@@ -140,7 +140,8 @@ def step_mapping(input_dir: Path, output_dir: Path, fmt: str = "parquet",
 
     # Find snapshot files
     if fmt == "parquet":
-        files = sorted(input_dir.rglob("*snapshot*day*.parquet"))
+        # Look in SNAPSHOT/EDGES/day/ directory structure from ORBITAAL tar.gz
+        files = sorted(input_dir.rglob("*snapshot*.parquet"))
     else:
         files = sorted(input_dir.glob("*snapshot*.csv"))
 
@@ -280,7 +281,7 @@ def step_snapshots(input_dir: Path, output_dir: Path, fmt: str = "parquet",
 
     # Find snapshot files
     if fmt == "parquet":
-        files = sorted(input_dir.rglob("*snapshot*day*.parquet"))
+        files = sorted(input_dir.rglob("*snapshot*.parquet"))
     else:
         files = sorted(input_dir.glob("*snapshot*.csv"))
 
