@@ -1,3 +1,16 @@
+"""Legacy prototype for building payment graphs from CSV samples.
+
+Provides the PaymentGraph class that converts raw ORBITAAL DataFrames
+into a PyTorch Geometric-compatible format (edge_index, edge_attr).
+Graphs are serialized as pickle files.
+
+Note:
+    For the full pipeline with global node indexing, use build_pipeline.py instead.
+
+Usage:
+    python src/build_graphs.py
+"""
+
 import pandas as pd
 import numpy as np
 import pickle
@@ -8,7 +21,21 @@ DATA_DIR = ROOT / "data/samples"
 GRAPH_DIR = ROOT / "graphs"
 GRAPH_DIR.mkdir(exist_ok=True)
 
+
 class PaymentGraph:
+    """A payment transaction graph in PyTorch Geometric-compatible format.
+
+    Attributes:
+        name: Human-readable identifier for this graph.
+        edge_index: np.ndarray of shape (2, num_edges), int64.
+        edge_attr: np.ndarray of shape (num_edges, 2) with [btc, usd] per edge.
+        node_mapping: Dict mapping original entity_id to dense node index.
+        reverse_mapping: Dict mapping dense node index back to entity_id.
+        num_nodes: Total number of unique entities.
+        num_edges: Total number of edges.
+        timestamps: Optional np.ndarray of UNIX timestamps per edge.
+    """
+
     def __init__(self, name):
         self.name = name
         self.edge_index = None
@@ -20,6 +47,17 @@ class PaymentGraph:
         self.timestamps = None
 
     def from_dataframe(self, df, remove_self_loops=True, remove_entity_zero=True):
+        """Build graph from a raw ORBITAAL DataFrame.
+
+        Args:
+            df: DataFrame with columns SRC_ID, DST_ID, VALUE_SATOSHI, VALUE_USD,
+                and optionally TIMESTAMP.
+            remove_self_loops: If True, remove edges where SRC_ID == DST_ID.
+            remove_entity_zero: If True, remove edges involving entity 0 (coinbase).
+
+        Returns:
+            self, for method chaining.
+        """
         df = df.copy()
         if remove_entity_zero:
             df = df[(df['SRC_ID'] != 0) & (df['DST_ID'] != 0)]
@@ -46,6 +84,12 @@ class PaymentGraph:
         return self
 
     def to_pyg_format(self):
+        """Convert to PyTorch Geometric tensors.
+
+        Returns:
+            Dict with 'edge_index', 'edge_attr', 'num_nodes', and optionally 'timestamps'.
+            Falls back to numpy arrays if torch is not installed.
+        """
         try:
             import torch
             data = {
@@ -61,6 +105,7 @@ class PaymentGraph:
             return self.to_dict()
 
     def to_dict(self):
+        """Serialize graph data to a plain dict of numpy arrays."""
         return {
             'edge_index': self.edge_index,
             'edge_attr': self.edge_attr,
@@ -71,11 +116,17 @@ class PaymentGraph:
         }
 
     def save(self, path):
+        """Save graph as a pickle file.
+
+        Args:
+            path: Output file path.
+        """
         with open(path, 'wb') as f:
             pickle.dump(self.to_dict(), f)
         print(f"Saved: {path}")
 
     def stats(self):
+        """Print summary statistics for this graph."""
         print(f"\n{'='*50}")
         print(f"Graph: {self.name}")
         print(f"{'='*50}")
@@ -91,6 +142,7 @@ class PaymentGraph:
             print(f"Has timestamps: Yes ({len(self.timestamps):,})")
         else:
             print(f"Has timestamps: No (snapshot)")
+
 
 files = {
     'stream_08': DATA_DIR / "orbitaal-stream_graph-2016_07_08.csv",

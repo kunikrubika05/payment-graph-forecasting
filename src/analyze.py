@@ -1,15 +1,34 @@
+"""Exploratory data analysis on ORBITAAL CSV samples.
+
+Reads all CSV files from data/samples/, prints per-file and combined statistics
+including entity counts, value distributions, degree distributions, and graph density.
+
+Usage:
+    python src/analyze.py
+"""
+
 import pandas as pd
 from pathlib import Path
 
 DATA_DIR = Path(__file__).parent.parent / "data/samples"
 
+
 def analyze_file(filepath):
+    """Print detailed statistics for a single ORBITAAL CSV file.
+
+    Args:
+        filepath: Path to the CSV file.
+
+    Returns:
+        DataFrame with the loaded data.
+    """
     df = pd.read_csv(filepath)
     print(f"\n{'='*60}")
     print(f"FILE: {filepath.name}")
     print(f"{'='*60}")
     print(f"Rows: {len(df):,}")
     print(f"Columns: {list(df.columns)}")
+
     print(f"\nColumn types:")
     for col in df.columns:
         print(f"  {col}: {df[col].dtype}")
@@ -49,6 +68,7 @@ def analyze_file(filepath):
 
     return df
 
+
 files = sorted(DATA_DIR.glob("*.csv"))
 dfs = {}
 for f in files:
@@ -75,7 +95,6 @@ if snapshot_dfs:
     print(f"  Unique nodes: {len(pd.concat([snapshot['SRC_ID'], snapshot['DST_ID']]).unique()):,}")
     print(f"  Total BTC: {snapshot['VALUE_SATOSHI'].sum() / 1e8:,.2f}")
 
-if snapshot_dfs:
     n = len(pd.concat([snapshot['SRC_ID'], snapshot['DST_ID']]).unique())
     e = len(snapshot)
     if n > 1:
