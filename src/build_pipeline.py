@@ -198,14 +198,12 @@ def step_mapping(input_dir: Path, output_dir: Path, fmt: str = "parquet",
 # Step 4: Build daily snapshots
 # ---------------------------------------------------------------------------
 
-def _process_single_snapshot(args):
-    """Process one snapshot file: apply mapping, compute stats, save."""
-    filepath, mapping_path, output_dir, fmt = args
+def _process_single_snapshot(filepath, entity_to_idx, output_dir, fmt):
+    """Process one snapshot file: apply mapping, compute stats, save.
 
-    # Load mapping
-    mapping_df = pd.read_parquet(mapping_path)
-    entity_to_idx = dict(zip(mapping_df["entity_id"], mapping_df["node_index"]))
-
+    entity_to_idx is a pandas Series (index=entity_id, values=node_index)
+    which is much more memory-efficient than a Python dict for 320M+ entries.
+    """
     # Read snapshot
     if fmt == "parquet":
         df = pq.read_table(filepath).to_pandas()
@@ -213,19 +211,15 @@ def _process_single_snapshot(args):
         df = pd.read_csv(filepath)
 
     # Extract date from filename
-    name = filepath.stem
-    # Try to parse date from filename patterns:
-    #   parquet: orbitaal-snapshot-date-YYYY-MM-DD-file-id-N.snappy
-    #   csv: orbitaal-snapshot-2016_07_08
-    date_str = _extract_date(name)
+    date_str = _extract_date(filepath.stem)
     if not date_str:
-        date_str = name  # fallback
+        date_str = filepath.stem  # fallback
 
     # Clean: remove self-loops and entity 0
     df = df[(df["SRC_ID"] != 0) & (df["DST_ID"] != 0)]
     df = df[df["SRC_ID"] != df["DST_ID"]]
 
-    # Apply mapping
+    # Apply mapping using pandas Series (memory-efficient lookup)
     df["src_idx"] = df["SRC_ID"].map(entity_to_idx)
     df["dst_idx"] = df["DST_ID"].map(entity_to_idx)
 
@@ -250,10 +244,10 @@ def _process_single_snapshot(args):
     out_df.to_parquet(out_path, index=False)
 
     # Stats
-    unique_nodes = set(out_df["src_idx"]) | set(out_df["dst_idx"])
+    unique_nodes = len(np.union1d(out_df["src_idx"].values, out_df["dst_idx"].values))
     stats = {
         "date": date_str,
-        "num_nodes": len(unique_nodes),
+        "num_nodes": unique_nodes,
         "num_edges": len(out_df),
         "total_btc": float(out_df["btc"].sum()),
     }
@@ -282,7 +276,12 @@ def _extract_date(filename: str) -> str | None:
 
 def step_snapshots(input_dir: Path, output_dir: Path, fmt: str = "parquet",
                    n_workers: int = 4):
-    """Build daily snapshot parquet files with global node indices."""
+    """Build daily snapshot parquet files with global node indices.
+
+    Processes sequentially to avoid duplicating the 320M-entry mapping
+    across worker processes. The mapping is loaded once as a pandas Series
+    (~5 GB) instead of a Python dict (~32 GB).
+    """
     mapping_path = output_dir / "node_mapping.parquet"
     if not mapping_path.exists():
         print("[error] node_mapping.parquet not found. Run 'mapping' step first.")
@@ -303,34 +302,35 @@ def step_snapshots(input_dir: Path, output_dir: Path, fmt: str = "parquet",
 
     # Check which dates are already processed
     existing = {f.stem for f in snapshot_dir.glob("*.parquet")}
-    tasks = []
+    pending_files = []
     for f in files:
         date_str = _extract_date(f.stem)
         if date_str and date_str in existing:
             continue
-        tasks.append((f, mapping_path, output_dir, fmt))
+        pending_files.append(f)
 
-    if not tasks:
+    if not pending_files:
         print(f"[skip] All {len(files)} snapshots already processed")
         return
 
-    print(f"[snapshots] Processing {len(tasks)} files ({len(existing)} already done)...")
+    # Load mapping ONCE as pandas Series (memory-efficient)
+    print(f"[snapshots] Loading mapping...")
+    mapping_df = pd.read_parquet(mapping_path)
+    entity_to_idx = pd.Series(
+        mapping_df["node_index"].values,
+        index=mapping_df["entity_id"].values,
+    )
+    print(f"[snapshots] Mapping loaded: {len(entity_to_idx):,} entities "
+          f"(~{entity_to_idx.nbytes / 1e9:.1f} GB)")
+
+    print(f"[snapshots] Processing {len(pending_files)} files ({len(existing)} already done)...")
 
     all_stats = []
-    if n_workers > 1 and len(tasks) > 1:
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            futures = {pool.submit(_process_single_snapshot, t): t for t in tasks}
-            for i, future in enumerate(as_completed(futures), 1):
-                stats = future.result()
-                all_stats.append(stats)
-                if i % 100 == 0 or i == len(tasks):
-                    print(f"  [{i}/{len(tasks)}] last: {stats['date']} "
-                          f"({stats['num_nodes']:,} nodes, {stats['num_edges']:,} edges)")
-    else:
-        for i, t in enumerate(tasks, 1):
-            stats = _process_single_snapshot(t)
-            all_stats.append(stats)
-            print(f"  [{i}/{len(tasks)}] {stats['date']} "
+    for i, f in enumerate(pending_files, 1):
+        stats = _process_single_snapshot(f, entity_to_idx, output_dir, fmt)
+        all_stats.append(stats)
+        if i % 100 == 0 or i == len(pending_files):
+            print(f"  [{i}/{len(pending_files)}] {stats['date']} "
                   f"({stats['num_nodes']:,} nodes, {stats['num_edges']:,} edges)")
 
     # Save/update stats
