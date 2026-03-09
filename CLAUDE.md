@@ -148,6 +148,9 @@ Branch naming: `feature/<name>`, `fix/<name>`, `experiment/<name>`
 - **Write tests** for any new functionality. Place them in `tests/`.
 - Run `pytest tests/ -v` before proposing changes as ready.
 - Use the project's virtual environment (venv). Do NOT use system pip.
+- **Write docstrings** for all public functions, classes, and modules (Google style).
+- **Do NOT write inline comments.** Code should be self-explanatory. Docstrings only.
+- Maintain documentation in `docs/` as the project grows (see `docs/README.md`).
 - Communicate with the user in Russian.
 
 ### Security
@@ -246,9 +249,18 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
 
 ---
 
+### Current decisions
+
+- **Stream graph is deferred.** We focus on snapshot-day (daily aggregated graphs) for now.
+  Stream graph (`orbitaal-stream_graph.tar.gz`) is kept on the dev machine for future use
+  (link prediction with temporal resolution, sub-daily analysis). Do not delete it.
+- **Raw snapshot-day tar.gz and extracted parquet** can be deleted from the dev machine
+  after confirming processed data is intact on Yandex.Disk.
+
+---
+
 ## Open questions
 
 1. Which task formulation to prioritize? (Graph-level forecasting is easiest to start; link prediction is most impactful)
 2. Which baselines to implement first? (SARIMAX on daily_stats for graph-level; heuristic methods for link prediction)
-3. Should we use only daily snapshots or also process stream graphs for finer temporal resolution?
-4. How to handle the pre-2010 period with sparse/empty graphs? (Likely just filter to 2010+ or 2010-07-17+)
+3. How to handle the pre-2010 period with sparse/empty graphs? (Likely just filter to 2010+ or 2010-07-17+)

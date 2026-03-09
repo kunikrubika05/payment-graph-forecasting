@@ -1,3 +1,15 @@
+"""Visualization scripts for ORBITAAL CSV sample data.
+
+Generates plots for degree distribution, hourly activity patterns,
+transaction value distribution, temporal transaction rates,
+entity overlap between days, and a network subgraph.
+
+Output is saved to the output/ directory as PNG files.
+
+Usage:
+    python src/visualize.py
+"""
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt

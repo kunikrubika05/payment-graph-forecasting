@@ -1,19 +1,13 @@
-"""
-Pipeline for building payment graphs from ORBITAAL dataset.
+"""Pipeline for building payment graphs from ORBITAAL dataset.
+
+Downloads raw data from Zenodo, builds a global node mapping,
+produces daily snapshot parquet files with dense node indices,
+and uploads results to Yandex.Disk.
 
 Usage:
-    # Full pipeline on dev machine (download from Zenodo, build, upload to Yandex.Disk):
     python build_pipeline.py --steps download extract mapping snapshots upload
-
-    # Build from local CSV samples (for testing):
     python build_pipeline.py --steps mapping snapshots --input-dir ../data/samples --format csv
-
-    # Individual steps:
     python build_pipeline.py --steps download --zenodo-files snapshot-day nodetable
-    python build_pipeline.py --steps extract
-    python build_pipeline.py --steps mapping
-    python build_pipeline.py --steps snapshots
-    python build_pipeline.py --steps upload
 """
 
 import argparse
@@ -54,7 +48,6 @@ ZENODO_FILES = {
     },
 }
 
-# CSV samples (small files for testing)
 CSV_SAMPLES = {
     "stream-08": f"{ZENODO_BASE}/orbitaal-stream_graph-2016_07_08.csv?download=1",
     "stream-09": f"{ZENODO_BASE}/orbitaal-stream_graph-2016_07_09.csv?download=1",
@@ -63,12 +56,13 @@ CSV_SAMPLES = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Step 1: Download
-# ---------------------------------------------------------------------------
-
 def step_download(raw_dir: Path, zenodo_files: list[str]):
-    """Download files from Zenodo using wget with resume support."""
+    """Download files from Zenodo using wget with resume support.
+
+    Args:
+        raw_dir: Local directory to save downloaded files.
+        zenodo_files: List of file keys from ZENODO_FILES to download.
+    """
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     for key in zenodo_files:
@@ -89,12 +83,12 @@ def step_download(raw_dir: Path, zenodo_files: list[str]):
         print(f"[done] {dest.name}")
 
 
-# ---------------------------------------------------------------------------
-# Step 2: Extract
-# ---------------------------------------------------------------------------
-
 def step_extract(raw_dir: Path):
-    """Extract tar.gz archives."""
+    """Extract all tar.gz archives in the raw data directory.
+
+    Args:
+        raw_dir: Directory containing tar.gz files.
+    """
     for archive in sorted(raw_dir.glob("*.tar.gz")):
         print(f"[extract] {archive.name}...")
         subprocess.run(
@@ -104,18 +98,14 @@ def step_extract(raw_dir: Path):
         print(f"[done] {archive.name}")
 
 
-# ---------------------------------------------------------------------------
-# Step 3: Build global node mapping
-# ---------------------------------------------------------------------------
-
 def _collect_entity_ids_from_parquet(filepath: Path) -> np.ndarray:
-    """Read a single parquet file and return unique entity IDs as numpy array."""
+    """Read a single parquet snapshot and return unique entity IDs."""
     df = pq.read_table(filepath, columns=["SRC_ID", "DST_ID"]).to_pandas()
     return np.unique(np.concatenate([df["SRC_ID"].values, df["DST_ID"].values]))
 
 
 def _collect_entity_ids_from_csv(filepath: Path) -> np.ndarray:
-    """Read a single CSV file and return unique entity IDs as numpy array."""
+    """Read a single CSV snapshot and return unique entity IDs."""
     df = pd.read_csv(filepath, usecols=["SRC_ID", "DST_ID"])
     return np.unique(np.concatenate([df["SRC_ID"].values, df["DST_ID"].values]))
 
@@ -124,11 +114,21 @@ def step_mapping(input_dir: Path, output_dir: Path, fmt: str = "parquet",
                  n_workers: int = 4):
     """Build global entity_id -> node_index mapping.
 
-    Scans all snapshot files, collects unique entity IDs,
-    assigns dense indices 0..N-1, saves mapping as parquet.
+    Scans all snapshot files, collects unique entity IDs, assigns dense
+    indices 0..N-1, and saves the mapping as a parquet file. Entity 0
+    (coinbase/special) is excluded.
 
-    Uses numpy arrays instead of Python sets for memory efficiency:
-    320M int64 in numpy = ~2.5 GB vs ~25 GB in Python set.
+    Uses numpy arrays with batch processing for memory efficiency:
+    320M int64 in numpy ≈ 2.5 GB vs ≈ 25 GB in a Python set.
+
+    Args:
+        input_dir: Directory containing raw snapshot files.
+        output_dir: Directory to save node_mapping.parquet.
+        fmt: Input format, "parquet" or "csv".
+        n_workers: Unused (kept for CLI compatibility).
+
+    Returns:
+        DataFrame with columns (entity_id, node_index).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     mapping_path = output_dir / "node_mapping.parquet"
@@ -137,9 +137,7 @@ def step_mapping(input_dir: Path, output_dir: Path, fmt: str = "parquet",
         print(f"[skip] {mapping_path} already exists")
         return pd.read_parquet(mapping_path)
 
-    # Find snapshot files
     if fmt == "parquet":
-        # Look in SNAPSHOT/EDGES/day/ directory structure from ORBITAAL tar.gz
         files = sorted(input_dir.rglob("*snapshot*.parquet"))
     else:
         files = sorted(input_dir.glob("*snapshot*.csv"))
@@ -152,9 +150,7 @@ def step_mapping(input_dir: Path, output_dir: Path, fmt: str = "parquet",
 
     collect_fn = _collect_entity_ids_from_parquet if fmt == "parquet" else _collect_entity_ids_from_csv
 
-    # Accumulate IDs in batches, merge periodically to keep memory bounded
-    # Each batch: ~2 GB of raw IDs before dedup
-    BATCH_LIMIT = 2 * 1024**3  # 2 GB
+    BATCH_LIMIT = 2 * 1024**3
     batch_ids = []
     batch_bytes = 0
     unique_ids = np.array([], dtype=np.int64)
@@ -164,7 +160,6 @@ def step_mapping(input_dir: Path, output_dir: Path, fmt: str = "parquet",
         batch_ids.append(file_ids)
         batch_bytes += file_ids.nbytes
 
-        # Merge batch when it gets large, or on last file
         if batch_bytes >= BATCH_LIMIT or i == len(files):
             merged = np.concatenate(batch_ids)
             new_unique = np.unique(merged)
@@ -179,10 +174,8 @@ def step_mapping(input_dir: Path, output_dir: Path, fmt: str = "parquet",
         elif i % 200 == 0:
             print(f"  [{i}/{len(files)}] processing...")
 
-    # Remove entity 0 (special)
     unique_ids = unique_ids[unique_ids != 0]
 
-    # Already sorted by np.unique
     mapping_df = pd.DataFrame({
         "entity_id": unique_ids,
         "node_index": np.arange(len(unique_ids), dtype=np.int64),
@@ -194,36 +187,59 @@ def step_mapping(input_dir: Path, output_dir: Path, fmt: str = "parquet",
     return mapping_df
 
 
-# ---------------------------------------------------------------------------
-# Step 4: Build daily snapshots
-# ---------------------------------------------------------------------------
+def _extract_date(filename: str) -> str | None:
+    """Extract YYYY-MM-DD date string from an ORBITAAL filename.
+
+    Supports two patterns:
+        - CSV: orbitaal-snapshot-2016_07_08 -> 2016-07-08
+        - Parquet: orbitaal-snapshot-date-2016-07-08-file-id-123 -> 2016-07-08
+
+    Args:
+        filename: Filename stem (without extension).
+
+    Returns:
+        Date string in YYYY-MM-DD format, or None if no pattern matches.
+    """
+    import re
+
+    m = re.search(r"(\d{4})_(\d{2})_(\d{2})", filename)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+    m = re.search(r"date-(\d{4})-(\d{2})-(\d{2})", filename)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+    return None
+
 
 def _process_single_snapshot(filepath, entity_to_idx, output_dir, fmt):
-    """Process one snapshot file: apply mapping, compute stats, save.
+    """Process one snapshot file: apply global mapping, compute stats, save.
 
-    entity_to_idx is a pandas Series (index=entity_id, values=node_index)
-    which is much more memory-efficient than a Python dict for 320M+ entries.
+    Args:
+        filepath: Path to the raw snapshot file.
+        entity_to_idx: pandas Series mapping entity_id -> node_index.
+        output_dir: Base output directory (daily_snapshots/ subdirectory is used).
+        fmt: Input format, "parquet" or "csv".
+
+    Returns:
+        Dict with daily statistics (date, num_nodes, num_edges, total_btc, total_usd).
     """
-    # Read snapshot
     if fmt == "parquet":
         df = pq.read_table(filepath).to_pandas()
     else:
         df = pd.read_csv(filepath)
 
-    # Extract date from filename
     date_str = _extract_date(filepath.stem)
     if not date_str:
-        date_str = filepath.stem  # fallback
+        date_str = filepath.stem
 
-    # Clean: remove self-loops and entity 0
     df = df[(df["SRC_ID"] != 0) & (df["DST_ID"] != 0)]
     df = df[df["SRC_ID"] != df["DST_ID"]]
 
-    # Apply mapping using pandas Series (memory-efficient lookup)
     df["src_idx"] = df["SRC_ID"].map(entity_to_idx)
     df["dst_idx"] = df["DST_ID"].map(entity_to_idx)
 
-    # Drop rows where mapping failed (shouldn't happen, but safety)
     before = len(df)
     df = df.dropna(subset=["src_idx", "dst_idx"])
     if len(df) < before:
@@ -238,12 +254,10 @@ def _process_single_snapshot(filepath, entity_to_idx, output_dir, fmt):
     else:
         out_df = df[["src_idx", "dst_idx", "btc"]]
 
-    # Save
     out_path = output_dir / "daily_snapshots" / f"{date_str}.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_df.to_parquet(out_path, index=False)
 
-    # Stats
     unique_nodes = len(np.union1d(out_df["src_idx"].values, out_df["dst_idx"].values))
     stats = {
         "date": date_str,
@@ -257,37 +271,25 @@ def _process_single_snapshot(filepath, entity_to_idx, output_dir, fmt):
     return stats
 
 
-def _extract_date(filename: str) -> str | None:
-    """Extract date string from ORBITAAL filename patterns."""
-    import re
-
-    # CSV pattern: orbitaal-snapshot-2016_07_08
-    m = re.search(r"(\d{4})_(\d{2})_(\d{2})", filename)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-
-    # Parquet pattern: orbitaal-snapshot-date-2016-07-08-file-id-123
-    m = re.search(r"date-(\d{4})-(\d{2})-(\d{2})", filename)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-
-    return None
-
-
 def step_snapshots(input_dir: Path, output_dir: Path, fmt: str = "parquet",
                    n_workers: int = 4):
     """Build daily snapshot parquet files with global node indices.
 
-    Processes sequentially to avoid duplicating the 320M-entry mapping
-    across worker processes. The mapping is loaded once as a pandas Series
-    (~5 GB) instead of a Python dict (~32 GB).
+    Loads the global mapping once as a pandas Series (~5 GB for 320M entities)
+    and processes files sequentially to avoid duplicating the mapping across
+    worker processes.
+
+    Args:
+        input_dir: Directory containing raw snapshot files.
+        output_dir: Directory with node_mapping.parquet and for daily_snapshots/ output.
+        fmt: Input format, "parquet" or "csv".
+        n_workers: Unused (sequential processing for memory safety).
     """
     mapping_path = output_dir / "node_mapping.parquet"
     if not mapping_path.exists():
         print("[error] node_mapping.parquet not found. Run 'mapping' step first.")
         sys.exit(1)
 
-    # Find snapshot files
     if fmt == "parquet":
         files = sorted(input_dir.rglob("*snapshot*.parquet"))
     else:
@@ -300,7 +302,6 @@ def step_snapshots(input_dir: Path, output_dir: Path, fmt: str = "parquet",
     snapshot_dir = output_dir / "daily_snapshots"
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check which dates are already processed
     existing = {f.stem for f in snapshot_dir.glob("*.parquet")}
     pending_files = []
     for f in files:
@@ -313,7 +314,6 @@ def step_snapshots(input_dir: Path, output_dir: Path, fmt: str = "parquet",
         print(f"[skip] All {len(files)} snapshots already processed")
         return
 
-    # Load mapping ONCE as pandas Series (memory-efficient)
     print(f"[snapshots] Loading mapping...")
     mapping_df = pd.read_parquet(mapping_path)
     entity_to_idx = pd.Series(
@@ -333,7 +333,6 @@ def step_snapshots(input_dir: Path, output_dir: Path, fmt: str = "parquet",
             print(f"  [{i}/{len(pending_files)}] {stats['date']} "
                   f"({stats['num_nodes']:,} nodes, {stats['num_edges']:,} edges)")
 
-    # Save/update stats
     stats_path = output_dir / "daily_stats.csv"
     new_stats_df = pd.DataFrame(all_stats)
     if stats_path.exists():
@@ -345,12 +344,15 @@ def step_snapshots(input_dir: Path, output_dir: Path, fmt: str = "parquet",
     print(f"[snapshots] Stats saved to {stats_path}")
 
 
-# ---------------------------------------------------------------------------
-# Step 5: Upload to Yandex.Disk
-# ---------------------------------------------------------------------------
-
 def step_upload(output_dir: Path, remote_path: str = "orbitaal_processed"):
-    """Upload processed data to Yandex.Disk via REST API."""
+    """Upload processed data to Yandex.Disk via REST API.
+
+    Requires YADISK_TOKEN environment variable with a valid OAuth token.
+
+    Args:
+        output_dir: Local directory with processed files.
+        remote_path: Remote folder name on Yandex.Disk.
+    """
     token = os.environ.get("YADISK_TOKEN")
     if not token:
         print("[error] YADISK_TOKEN environment variable not set")
@@ -374,7 +376,7 @@ def step_upload(output_dir: Path, remote_path: str = "orbitaal_processed"):
         try:
             yadisk_request(url, method="PUT")
         except urllib.error.HTTPError:
-            pass  # folder may already exist
+            pass
 
     def upload_file(local_path: Path, remote_file_path: str):
         url = (f"{api_base}/upload"
@@ -391,23 +393,19 @@ def step_upload(output_dir: Path, remote_path: str = "orbitaal_processed"):
             urllib.request.urlopen(req)
         return True
 
-    # Create remote folders
     ensure_folder(remote_path)
     ensure_folder(f"{remote_path}/daily_snapshots")
 
-    # Upload node_mapping
     mapping_file = output_dir / "node_mapping.parquet"
     if mapping_file.exists():
         print(f"[upload] {mapping_file.name}...")
         upload_file(mapping_file, f"{remote_path}/node_mapping.parquet")
 
-    # Upload stats
     stats_file = output_dir / "daily_stats.csv"
     if stats_file.exists():
         print(f"[upload] {stats_file.name}...")
         upload_file(stats_file, f"{remote_path}/daily_stats.csv")
 
-    # Upload daily snapshots
     snapshot_dir = output_dir / "daily_snapshots"
     if snapshot_dir.exists():
         files = sorted(snapshot_dir.glob("*.parquet"))
@@ -420,11 +418,8 @@ def step_upload(output_dir: Path, remote_path: str = "orbitaal_processed"):
     print("[upload] Done")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def main():
+    """CLI entry point for the ORBITAAL graph building pipeline."""
     parser = argparse.ArgumentParser(description="ORBITAAL graph building pipeline")
     parser.add_argument(
         "--steps", nargs="+", required=True,
