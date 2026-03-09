@@ -96,7 +96,9 @@ src/
 ├── analyze.py          # Exploratory data analysis on CSV samples
 ├── build_graphs.py     # PaymentGraph class (PyG-compatible, pickle format)
 ├── build_pipeline.py   # Main pipeline: download → mapping → snapshots → upload
+├── compute_features.py # Graph-level and node-level feature computation
 └── visualize.py        # Visualization scripts
 tests/
-└── test_pipeline.py    # Pipeline tests (11 tests)
+├── test_pipeline.py          # Pipeline tests (11 tests)
+└── test_compute_features.py  # Feature computation tests (36 tests)
 ```

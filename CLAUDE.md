@@ -79,9 +79,36 @@ data/raw/
 - **float32 precision artifacts** in btc values (e.g. 134.08999633789062) — acceptable for ML
 - **~14.6% node overlap** between consecutive days — most entities appear and disappear within one day
 
+### Feature computation pipeline
+
+`src/compute_features.py`: computes graph-level and node-level features from daily snapshots.
+Uses scipy.sparse for PageRank, clustering, connected components; custom Batagelj-Zaversnik
+for k-core. No networkx dependency at runtime.
+
+**Graph-level features** (~40 columns): degree stats, Gini, BTC/USD aggregates, WCC/SCC,
+clustering, triangles, PageRank stats, k-core, assortativity, reciprocity.
+
+**Node-level features** (26 columns per node): degree, weighted degree, balance, transaction
+stats (avg/median/max/min/std BTC), unique counterparties, PageRank, clustering, k-core, triangles.
+
+**Output:**
+```
+data/processed/
+  graph_features.csv            # one row per day, ~40 columns
+  node_features/
+    2009-01-03.parquet          # one file per day, only active nodes
+    ...
+```
+
+Supports `--upload` mode: uploads node features to Yandex.Disk in batches and deletes
+local copies to conserve disk space. Supports resume (skips already processed days).
+
 ### Tests
 
-11 tests in `tests/test_pipeline.py` — all passing. Tests use CSV samples from `data/samples/`.
+47 tests total — all passing:
+- `tests/test_pipeline.py` — 11 tests for the data pipeline
+- `tests/test_compute_features.py` — 36 tests for feature computation (correctness,
+  disk cleanup, resume, edge cases)
 
 ---
 
@@ -90,11 +117,13 @@ data/raw/
 ```
 src/
   build_pipeline.py     # Main pipeline (download/extract/mapping/snapshots/upload)
+  compute_features.py   # Graph-level and node-level feature computation
   build_graphs.py       # PaymentGraph class (legacy prototype, pickle format)
   analyze.py            # EDA on CSV samples
   visualize.py          # Visualization scripts
 tests/
   test_pipeline.py      # 11 tests for the pipeline
+  test_compute_features.py  # 36 tests for feature computation
 data/
   samples/              # CSV samples for 2016-07-08 and 2016-07-09 (halving day)
   raw/                  # Raw ORBITAAL data (on dev machine only, gitignored)
