@@ -46,17 +46,17 @@ class TestExtractDate:
 
 
 class TestCollectEntityIds:
-    def test_returns_set_of_ints(self):
+    def test_returns_numpy_array(self):
         ids = _collect_entity_ids_from_csv(SNAPSHOT_08)
-        assert isinstance(ids, set)
+        assert isinstance(ids, np.ndarray)
         assert len(ids) > 0
-        assert all(isinstance(i, (int, np.integer)) for i in list(ids)[:10])
+        assert ids.dtype == np.int64 or np.issubdtype(ids.dtype, np.integer)
 
     def test_includes_src_and_dst(self):
         df = pd.read_csv(SNAPSHOT_08, nrows=100)
-        ids = set(df["SRC_ID"]) | set(df["DST_ID"])
-        collected = _collect_entity_ids_from_csv(SNAPSHOT_08)
-        assert ids.issubset(collected)
+        expected = set(df["SRC_ID"]) | set(df["DST_ID"])
+        collected = set(_collect_entity_ids_from_csv(SNAPSHOT_08))
+        assert expected.issubset(collected)
 
 
 class TestStepMapping:
