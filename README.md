@@ -6,6 +6,8 @@ Forecasting the dynamics of the payment graph based on open payment data.
 
 **ORBITAAL** — Bitcoin transaction network between entities (clustered addresses), covering 2009-01-03 to 2021-01-25. Source: [Zenodo](https://zenodo.org/records/12581515).
 
+**Processed data:** [Yandex.Disk](https://disk.yandex.ru/client/disk/orbitaal_processed) — daily snapshots, node mapping, statistics.
+
 ## Processed graph format
 
 The pipeline (`src/build_pipeline.py`) produces the following structure:

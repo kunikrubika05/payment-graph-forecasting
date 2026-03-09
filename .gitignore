@@ -210,3 +210,9 @@ __marimo__/
 data/
 graphs/
 output/
+daily_stats.csv
+dev_machine/
+.DS_Store
+*.zip
+prompt_0.md
+official_project_description.pdf
