@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 from pathlib import Path
 
 DATA_DIR = Path(__file__).parent.parent / "data/samples"
@@ -76,7 +75,9 @@ if snapshot_dfs:
     print(f"  Unique nodes: {len(pd.concat([snapshot['SRC_ID'], snapshot['DST_ID']]).unique()):,}")
     print(f"  Total BTC: {snapshot['VALUE_SATOSHI'].sum() / 1e8:,.2f}")
 
-n = len(pd.concat([snapshot['SRC_ID'], snapshot['DST_ID']]).unique())
-e = len(snapshot)
-density = e / (n * (n - 1))
-print(f"\nGraph density: {density:.2e}")
+if snapshot_dfs:
+    n = len(pd.concat([snapshot['SRC_ID'], snapshot['DST_ID']]).unique())
+    e = len(snapshot)
+    if n > 1:
+        density = e / (n * (n - 1))
+        print(f"\nGraph density: {density:.2e}")

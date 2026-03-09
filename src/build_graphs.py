@@ -20,6 +20,7 @@ class PaymentGraph:
         self.timestamps = None
 
     def from_dataframe(self, df, remove_self_loops=True, remove_entity_zero=True):
+        df = df.copy()
         if remove_entity_zero:
             df = df[(df['SRC_ID'] != 0) & (df['DST_ID'] != 0)]
         if remove_self_loops:
@@ -80,7 +81,10 @@ class PaymentGraph:
         print(f"{'='*50}")
         print(f"Nodes: {self.num_nodes:,}")
         print(f"Edges: {self.num_edges:,}")
-        print(f"Density: {self.num_edges / (self.num_nodes * (self.num_nodes - 1)):.2e}")
+        if self.num_nodes > 1:
+            print(f"Density: {self.num_edges / (self.num_nodes * (self.num_nodes - 1)):.2e}")
+        else:
+            print(f"Density: N/A (fewer than 2 nodes)")
         print(f"Edge attr shape: {self.edge_attr.shape}")
         print(f"BTC range: [{self.edge_attr[:,0].min():.6f}, {self.edge_attr[:,0].max():.2f}]")
         if self.timestamps is not None:

@@ -5,7 +5,7 @@ import networkx as nx
 from pathlib import Path
 from collections import Counter
 
-plt.rcParams["figure.figsize"] = 11, 7
+plt.rcParams["figure.figsize"] = (11, 7)
 plt.rcParams["font.family"] = "DejaVu Serif"
 plt.rcParams["lines.linewidth"] = 2
 plt.rcParams["lines.markersize"] = 8
