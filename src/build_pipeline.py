@@ -108,20 +108,16 @@ def step_extract(raw_dir: Path):
 # Step 3: Build global node mapping
 # ---------------------------------------------------------------------------
 
-def _collect_entity_ids_from_parquet(filepath: Path) -> set[int]:
-    """Read a single parquet file and return set of unique entity IDs."""
+def _collect_entity_ids_from_parquet(filepath: Path) -> np.ndarray:
+    """Read a single parquet file and return unique entity IDs as numpy array."""
     df = pq.read_table(filepath, columns=["SRC_ID", "DST_ID"]).to_pandas()
-    src = set(df["SRC_ID"].unique())
-    dst = set(df["DST_ID"].unique())
-    return src | dst
+    return np.unique(np.concatenate([df["SRC_ID"].values, df["DST_ID"].values]))
 
 
-def _collect_entity_ids_from_csv(filepath: Path) -> set[int]:
-    """Read a single CSV file and return set of unique entity IDs."""
+def _collect_entity_ids_from_csv(filepath: Path) -> np.ndarray:
+    """Read a single CSV file and return unique entity IDs as numpy array."""
     df = pd.read_csv(filepath, usecols=["SRC_ID", "DST_ID"])
-    src = set(df["SRC_ID"].unique())
-    dst = set(df["DST_ID"].unique())
-    return src | dst
+    return np.unique(np.concatenate([df["SRC_ID"].values, df["DST_ID"].values]))
 
 
 def step_mapping(input_dir: Path, output_dir: Path, fmt: str = "parquet",
@@ -130,6 +126,9 @@ def step_mapping(input_dir: Path, output_dir: Path, fmt: str = "parquet",
 
     Scans all snapshot files, collects unique entity IDs,
     assigns dense indices 0..N-1, saves mapping as parquet.
+
+    Uses numpy arrays instead of Python sets for memory efficiency:
+    320M int64 in numpy = ~2.5 GB vs ~25 GB in Python set.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     mapping_path = output_dir / "node_mapping.parquet"
@@ -150,33 +149,43 @@ def step_mapping(input_dir: Path, output_dir: Path, fmt: str = "parquet",
         sys.exit(1)
 
     print(f"[mapping] Scanning {len(files)} files for unique entity IDs...")
-    all_ids = set()
 
     collect_fn = _collect_entity_ids_from_parquet if fmt == "parquet" else _collect_entity_ids_from_csv
 
-    if n_workers > 1 and len(files) > 1:
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            futures = {pool.submit(collect_fn, f): f for f in files}
-            for i, future in enumerate(as_completed(futures), 1):
-                ids = future.result()
-                all_ids |= ids
-                if i % 100 == 0 or i == len(files):
-                    print(f"  [{i}/{len(files)}] unique IDs so far: {len(all_ids):,}")
-    else:
-        for i, f in enumerate(files, 1):
-            ids = collect_fn(f)
-            all_ids |= ids
-            if i % 10 == 0 or i == len(files):
-                print(f"  [{i}/{len(files)}] unique IDs so far: {len(all_ids):,}")
+    # Accumulate IDs in batches, merge periodically to keep memory bounded
+    # Each batch: ~2 GB of raw IDs before dedup
+    BATCH_LIMIT = 2 * 1024**3  # 2 GB
+    batch_ids = []
+    batch_bytes = 0
+    unique_ids = np.array([], dtype=np.int64)
+
+    for i, f in enumerate(files, 1):
+        file_ids = collect_fn(f)
+        batch_ids.append(file_ids)
+        batch_bytes += file_ids.nbytes
+
+        # Merge batch when it gets large, or on last file
+        if batch_bytes >= BATCH_LIMIT or i == len(files):
+            merged = np.concatenate(batch_ids)
+            new_unique = np.unique(merged)
+            if len(unique_ids) > 0:
+                unique_ids = np.unique(np.concatenate([unique_ids, new_unique]))
+            else:
+                unique_ids = new_unique
+            batch_ids = []
+            batch_bytes = 0
+            print(f"  [{i}/{len(files)}] unique IDs so far: {len(unique_ids):,} "
+                  f"(~{unique_ids.nbytes / 1e9:.1f} GB)")
+        elif i % 200 == 0:
+            print(f"  [{i}/{len(files)}] processing...")
 
     # Remove entity 0 (special)
-    all_ids.discard(0)
+    unique_ids = unique_ids[unique_ids != 0]
 
-    # Sort for deterministic mapping
-    sorted_ids = sorted(all_ids)
+    # Already sorted by np.unique
     mapping_df = pd.DataFrame({
-        "entity_id": sorted_ids,
-        "node_index": range(len(sorted_ids)),
+        "entity_id": unique_ids,
+        "node_index": np.arange(len(unique_ids), dtype=np.int64),
     })
 
     mapping_df.to_parquet(mapping_path, index=False)
