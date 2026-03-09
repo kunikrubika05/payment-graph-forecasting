@@ -21,6 +21,22 @@ Key exported functions (used in tests):
 - `step_mapping(input_dir, output_dir, fmt, n_workers)` — build global mapping
 - `step_snapshots(input_dir, output_dir, fmt, n_workers)` — build all daily snapshots
 
+### `src/compute_features.py`
+
+Computes graph-level and node-level features from daily snapshot parquets.
+
+**Key functions:**
+- `build_adjacency(src, dst, num_nodes)` — build compressed sparse adjacency
+- `compute_pagerank(adj)` — PageRank via scipy power iteration
+- `compute_clustering(adj)` — undirected clustering coefficient via sparse ops
+- `compute_k_core(adj)` — Batagelj-Zaversnik peeling algorithm
+- `compute_triangle_counts(adj)` — per-node triangle count via sparse A²·A
+- `compute_node_features(df, adj, ...)` — all 26 node-level features for one day
+- `compute_graph_features(df, date, adj, ..., node_features_df)` — all ~40 graph-level features
+- `process_single_day(filepath)` — end-to-end for one snapshot
+- `run_pipeline(input_dir, output_dir, upload, batch_size)` — main loop with progress bar
+- `upload_batch_and_cleanup(file_paths, remote_dir, token)` — upload to Yandex.Disk + delete local
+
 ### `src/build_graphs.py`
 
 Legacy prototype for building graphs from CSV samples. Provides `PaymentGraph` class
