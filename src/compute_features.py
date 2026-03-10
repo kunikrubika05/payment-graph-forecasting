@@ -96,11 +96,32 @@ def compute_pagerank(adj, alpha=0.85, max_iter=100, tol=1e-6):
     return pr / pr.sum()
 
 
+def _estimate_a2_memory(adj):
+    """Estimate memory (bytes) of A @ A for a symmetric binary sparse matrix.
+
+    The number of non-zeros in A² is bounded by sum(deg_i²). Each non-zero
+    takes ~12 bytes in CSR format (4 bytes index + 4 bytes data + overhead).
+
+    Args:
+        adj: Symmetric sparse binary matrix (CSR).
+
+    Returns:
+        Estimated memory in bytes.
+    """
+    deg = np.array(adj.sum(axis=1)).flatten()
+    nnz_estimate = int((deg ** 2).sum())
+    return nnz_estimate * 12
+
+
+MAX_A2_MEMORY_BYTES = 40 * 1024 ** 3
+
+
 def compute_clustering(adj):
     """Compute undirected clustering coefficient per node using sparse ops.
 
     Symmetrizes the adjacency matrix, then computes triangles via
-    A_sym @ A_sym element-wise multiplied by A_sym.
+    A_sym @ A_sym element-wise multiplied by A_sym. If estimated memory
+    for A² exceeds MAX_A2_MEMORY_BYTES (40 GB), returns zeros to avoid OOM.
 
     Args:
         adj: Sparse CSR adjacency matrix (directed).
@@ -116,6 +137,11 @@ def compute_clustering(adj):
     A = (A > 0).astype(np.float32)
     A.setdiag(0)
     A.eliminate_zeros()
+
+    mem = _estimate_a2_memory(A)
+    if mem > MAX_A2_MEMORY_BYTES:
+        print(f"\n  [skip] clustering: A² would use ~{mem / 1e9:.1f} GB (limit {MAX_A2_MEMORY_BYTES / 1e9:.0f} GB)")
+        return np.zeros(n, dtype=np.float64)
 
     deg = np.array(A.sum(axis=1)).flatten()
 
@@ -197,6 +223,9 @@ def compute_k_core(adj):
 def compute_triangle_counts(adj):
     """Compute per-node triangle count using sparse matrix multiplication.
 
+    If estimated memory for A² exceeds MAX_A2_MEMORY_BYTES (40 GB),
+    returns zeros to avoid OOM.
+
     Args:
         adj: Sparse CSR adjacency matrix (directed).
 
@@ -211,6 +240,11 @@ def compute_triangle_counts(adj):
     A = (A > 0).astype(np.float32)
     A.setdiag(0)
     A.eliminate_zeros()
+
+    mem = _estimate_a2_memory(A)
+    if mem > MAX_A2_MEMORY_BYTES:
+        print(f"\n  [skip] triangles: A² would use ~{mem / 1e9:.1f} GB (limit {MAX_A2_MEMORY_BYTES / 1e9:.0f} GB)")
+        return np.zeros(n, dtype=np.int64)
 
     A2 = A @ A
     tri = np.array(A2.multiply(A).sum(axis=1)).flatten() / 2.0
