@@ -65,10 +65,11 @@ orbitaal_processed/
 **Raw data on dev machine** (`data/raw/`):
 ```
 data/raw/
-  orbitaal-snapshot-day.tar.gz     # 24.8 GB (extracted -> SNAPSHOT/EDGES/day/)
   orbitaal-nodetable.tar.gz        # 24.9 GB (downloaded, NOT extracted yet)
   orbitaal-stream_graph.tar.gz     # 23.9 GB (downloaded, NOT extracted yet)
 ```
+Note: `orbitaal-snapshot-day.tar.gz` and its extracted parquets have been deleted
+from the dev machine after processed data was confirmed on Yandex.Disk.
 
 ### Data quality notes
 
@@ -102,6 +103,12 @@ data/processed/
 
 Supports `--upload` mode: uploads node features to Yandex.Disk in batches and deletes
 local copies to conserve disk space. Supports resume (skips already processed days).
+
+**Status:** 4351/4401 days computed. Remaining 50 days (2017-12-02 to 2018-01-20)
+are being computed right now in a single tmux process on the dev machine (~3 hours).
+Node features for these days will be uploaded to Yandex.Disk automatically.
+**→ Baselines should use the already-computed 4351 days. Do NOT block on these 50 days.**
+**→ After the 50 days finish: delete this status block, merge graph_features.csv, verify totals (see commands below in "Post-computation checklist").**
 
 ### Tests
 
@@ -182,6 +189,19 @@ Branch naming: `feature/<name>`, `fix/<name>`, `experiment/<name>`
 - Maintain documentation in `docs/` as the project grows (see `docs/README.md`).
 - Communicate with the user in Russian.
 
+### Logging and progress
+
+- **Always use `tee`** when running long processes: `command 2>&1 | tee /tmp/logfile.log`
+- **Progress bars** must show: current item, total, percentage, speed (sec/item), ETA, elapsed time
+- **Log file per process** — if a process crashes, the log must survive for diagnosis
+- **Never run long processes without logging** — silent crashes are unacceptable
+
+### Resource utilization
+
+- **Do NOT let dev machine CPU/GPU idle** while waiting. If a long process uses 1 core, consider running independent work on remaining cores.
+- **Parallelization safety:** for heavy graphs (2017+, ~500K nodes), max 1-2 workers on 64 GB RAM. Sparse matrix multiply (A²·A for triangles/clustering) is the bottleneck — each worker can use 10-20 GB peak.
+- **OOM risk:** if a tmux session silently disappears, it was likely killed by OOM-killer. Check `dmesg | grep -i oom` or the log file.
+
 ### Security
 
 - Do NOT commit secrets (tokens, IPs, passwords). Use environment variables.
@@ -224,7 +244,10 @@ orbitaal_processed/
   node_mapping.parquet
   daily_stats.csv
   daily_snapshots/
-    2009-01-03.parquet ... 2021-01-25.parquet
+    2009-01-03.parquet ... 2021-01-25.parquet  # 4401 files
+  node_features/
+    2009-01-03.parquet ... 2021-01-25.parquet  # ~4100 files (empty days have no node features)
+  graph_features.csv                           # will be uploaded after all 4401 days computed
 ```
 
 ### Loading processed data (code snippets)
@@ -285,6 +308,53 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
   (link prediction with temporal resolution, sub-daily analysis). Do not delete it.
 - **Raw snapshot-day tar.gz and extracted parquet** can be deleted from the dev machine
   after confirming processed data is intact on Yandex.Disk.
+
+### Post-computation checklist (50 remaining days)
+
+After the tmux `fix` session finishes, run these commands on the dev machine:
+
+```bash
+# 1. Verify all 50 days computed
+wc -l /tmp/fix_final_out/graph_features.csv
+# Expected: 51 (50 + header)
+
+# 2. Merge into main graph_features.csv
+tail -n +2 /tmp/fix_final_out/graph_features.csv >> ~/payment-graph-forecasting/data/processed/graph_features.csv
+
+# 3. Verify total
+wc -l ~/payment-graph-forecasting/data/processed/graph_features.csv
+# Expected: 4402 (4401 + header)
+
+# 4. Verify no missing dates
+cut -d',' -f1 data/processed/graph_features.csv | tail -n +2 | sort > /tmp/done_final.txt
+ls data/processed/daily_snapshots/ | sed 's/.parquet//' | sort > /tmp/all.txt
+comm -23 /tmp/all.txt /tmp/done_final.txt | wc -l
+# Expected: 0
+
+# 5. Check node features on Yandex.Disk
+curl -s -H "Authorization: OAuth $YADISK_TOKEN" \
+  "https://cloud-api.yandex.net/v1/disk/resources?path=orbitaal_processed/node_features&fields=_embedded.total" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['_embedded']['total'])"
+# Expected: ~4100+ (257 empty days produce no node features)
+
+# 6. Upload final graph_features.csv to Yandex.Disk
+python3 -c "
+import requests, os
+token = os.environ['YADISK_TOKEN']
+h = {'Authorization': f'OAuth {token}'}
+r = requests.get('https://cloud-api.yandex.net/v1/disk/resources/upload', headers=h,
+    params={'path': 'orbitaal_processed/graph_features.csv', 'overwrite': 'true'})
+href = r.json()['href']
+with open('data/processed/graph_features.csv', 'rb') as f:
+    requests.put(href, headers=h, data=f)
+print('Uploaded graph_features.csv')
+"
+
+# 7. Clean up temp files
+rm -rf /tmp/fix_final /tmp/fix_final_out /tmp/fix_worker* /tmp/fix_out_* /tmp/missing*.txt /tmp/done*.txt /tmp/all.txt
+```
+
+After all checks pass: **delete the "Status:" block from the "Feature computation pipeline" section above.**
 
 ---
 
