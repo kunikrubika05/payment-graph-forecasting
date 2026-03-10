@@ -393,7 +393,22 @@ def compute_graph_features(df, date_str, adj, unique_nodes, src_c, dst_c,
     m = len(df)
 
     if n == 0:
-        return {"date": date_str, "num_nodes": 0, "num_edges": 0}
+        return {
+            "date": date_str, "num_nodes": 0, "num_edges": 0, "density": 0.0,
+            "avg_in_degree": 0.0, "median_in_degree": 0.0, "max_in_degree": 0,
+            "std_in_degree": 0.0, "avg_out_degree": 0.0, "median_out_degree": 0.0,
+            "max_out_degree": 0, "std_out_degree": 0.0, "avg_total_degree": 0.0,
+            "max_total_degree": 0, "gini_total_degree": 0.0,
+            "avg_weighted_in_btc": 0.0, "avg_weighted_out_btc": 0.0,
+            "total_btc": 0.0, "total_usd": 0.0, "avg_btc": 0.0,
+            "median_btc": 0.0, "max_btc": 0.0, "std_btc": 0.0,
+            "num_wcc": 0, "largest_wcc_size": 0, "largest_wcc_fraction": 0.0,
+            "num_scc": 0, "largest_scc_size": 0, "largest_scc_fraction": 0.0,
+            "avg_clustering": 0.0, "num_triangles": 0,
+            "avg_pagerank": 0.0, "max_pagerank": 0.0, "std_pagerank": 0.0,
+            "gini_pagerank": 0.0, "max_k_core": 0, "avg_k_core": 0.0,
+            "assortativity": 0.0, "reciprocity": 0.0, "avg_neighbor_degree": 0.0,
+        }
 
     in_deg = node_features_df["in_degree"].values
     out_deg = node_features_df["out_degree"].values
