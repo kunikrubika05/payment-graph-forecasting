@@ -92,6 +92,11 @@ clustering, triangles, PageRank stats, k-core, assortativity, reciprocity.
 **Node-level features** (26 columns per node): degree, weighted degree, balance, transaction
 stats (avg/median/max/min/std BTC), unique counterparties, PageRank, clustering, k-core, triangles.
 
+**OOM-защита:** перед вычислением `A @ A` (для кластеризации и треугольников) оценивается
+размер результата как `sum(deg²) * 12 bytes`. Если >40 ГБ — эти фичи пропускаются (= 0).
+Это затрагивает ~50 дней периода Bitcoin-пузыря (конец 2017 — начало 2018), где графы
+особенно плотные. Все остальные фичи для этих дней считаются нормально.
+
 **Output:**
 ```
 data/processed/
@@ -104,18 +109,83 @@ data/processed/
 Supports `--upload` mode: uploads node features to Yandex.Disk in batches and deletes
 local copies to conserve disk space. Supports resume (skips already processed days).
 
-**Status:** 4351/4401 days computed. Remaining 50 days (2017-12-02 to 2018-01-20)
-are being computed right now in a single tmux process on the dev machine (~3 hours).
-Node features for these days will be uploaded to Yandex.Disk automatically.
-**→ Baselines should use the already-computed 4351 days. Do NOT block on these 50 days.**
-**→ After the 50 days finish: delete this status block, merge graph_features.csv, verify totals (see commands below in "Post-computation checklist").**
+**Статус:** Все 4401 день посчитаны. Данные на Яндекс.Диске.
+
+**Что есть:**
+- **graph_features.csv** — 4401 строка данных (все дни с 2009-01-03 по 2021-01-25).
+  На дев-машине и на Яндекс.Диске.
+- **Node features** — 4144 файла на Яндекс.Диске. Из 4401 дня 257 имеют 0 рёбер
+  (245 в 2009, 12 в 2010) — все транзакции шли через entity 0 (coinbase), который
+  исключён. Для этих 257 дней node features НЕ существуют — это ожидаемое поведение.
+- **~50 дней (2017-12-02 — 2018-01-20)**: clustering_coeff и triangle_count = 0
+  из-за OOM-защиты (`A @ A` на графах ~500K узлов требует >60 ГБ RAM).
+  Все остальные ~35 фичей для этих дней посчитаны полностью.
+
+### Baseline experiments pipeline
+
+`src/baselines/` — полный пайплайн для обучения и оценки бейзлайнов. Запускается одной
+командой, создаёт tmux-сессии, работает автономно. Результаты загружаются на Яндекс.Диск.
+
+**Задачи:**
+1. **Link Prediction** — LogReg, CatBoost, RandomForest на агрегированных node features.
+   Sliding window (W дней → предсказание рёбер дня W+1). Два режима: A (единая модель)
+   и B (live-update). Два типа negative sampling: random и historical.
+2. **Graph-level Forecasting** — ARIMA, SARIMAX, Holt-Winters, Prophet, naive baselines
+   на временных рядах из `graph_features.csv` (num_nodes, num_edges, total_btc, total_usd).
+3. **Heuristic Link Prediction** — Common Neighbors, Jaccard, Adamic-Adar, Preferential Attachment.
+
+**Периоды:** 10 блоков по ~90 дней из разных эпох Bitcoin (2012–2020).
+Окна агрегации: W ∈ {3, 7, 14, 30}. Feature modes: base (50 фичей) и extended (100 фичей).
+HP search встроен в пайплайн (grid search по val-метрике PR-AUC).
+
+**Модули:**
+- `src/yadisk_utils.py` — download/upload с Яндекс.Диска (retry, рекурсивные папки)
+- `src/baselines/config.py` — конфигурация экспериментов (периоды, HP-сетки, ExperimentConfig)
+- `src/baselines/data_loader.py` — загрузка node_features и daily_snapshots с Я.Диска
+- `src/baselines/feature_engineering.py` — mean/time-weighted агрегация, pair features
+- `src/baselines/evaluation.py` — ROC-AUC, PR-AUC, Precision@K, Recall@K, F1, MRR, MAE, RMSE, MAPE
+- `src/baselines/experiment_logger.py` — config.json, metrics.jsonl, summary.json, модели, предсказания
+- `src/baselines/link_prediction.py` — LP pipeline (Mode A + Mode B)
+- `src/baselines/graph_forecasting.py` — time series forecasting pipeline
+- `src/baselines/heuristic_baselines.py` — heuristic scores pipeline
+- `src/baselines/runner.py` — обработка очереди конфигов с resume и error handling
+- `src/baselines/launcher.py` — генерация ~45 экспериментов, распределение по tmux-сессиям
+
+**Запуск на дев-машине:**
+```bash
+cd ~/payment-graph-forecasting && git pull
+source venv/bin/activate && pip install -r requirements.txt
+PYTHONPATH=. python -m pytest tests/test_baselines.py -v
+export YADISK_TOKEN="..."
+PYTHONPATH=. python src/baselines/launcher.py --sessions 8
+```
+
+**Мониторинг:** `tmux ls`, `tail -f /tmp/baseline_logs/session_N.log`
+**Resume:** при перезапуске runner пропускает эксперименты с готовым `summary.json`.
+**Ошибки:** записываются в `error.txt` в папке эксперимента, runner переходит к следующему.
+
+**Структура результатов на Яндекс.Диске:**
+```
+orbitaal_processed/experiments/
+  exp_001_link_pred_baselines/
+    period_mid_2015q3_w7_mean_randomneg_modeA/
+      config.json, metrics.jsonl, summary.json
+      hp_search_results.json, feature_importance.json
+      feature_correlations.csv, high_correlations.json
+      model/best_logreg.pkl, best_catboost.cbm, best_rf.pkl
+      predictions/2015-09-15_logreg.parquet
+  exp_002_graph_level_baselines/
+  exp_003_heuristic_baselines/
+```
 
 ### Tests
 
-47 tests total — all passing:
+79 tests total — all passing:
 - `tests/test_pipeline.py` — 11 tests for the data pipeline
 - `tests/test_compute_features.py` — 36 tests for feature computation (correctness,
   disk cleanup, resume, edge cases)
+- `tests/test_baselines.py` — 32 tests for baseline pipeline (feature engineering,
+  evaluation metrics, experiment logger, link prediction helpers, heuristic helpers)
 
 ---
 
@@ -125,12 +195,25 @@ Node features for these days will be uploaded to Yandex.Disk automatically.
 src/
   build_pipeline.py     # Main pipeline (download/extract/mapping/snapshots/upload)
   compute_features.py   # Graph-level and node-level feature computation
+  yadisk_utils.py       # Yandex.Disk API utilities (download/upload)
   build_graphs.py       # PaymentGraph class (legacy prototype, pickle format)
   analyze.py            # EDA on CSV samples
   visualize.py          # Visualization scripts
+  baselines/
+    config.py           # Experiment configuration and HP grids
+    data_loader.py      # Load data from Yandex.Disk
+    feature_engineering.py  # Feature aggregation and pair features
+    evaluation.py       # Classification and time series metrics
+    experiment_logger.py    # Logging: config, metrics, models, predictions
+    link_prediction.py  # Link prediction pipeline (Mode A + B)
+    graph_forecasting.py    # ARIMA, SARIMAX, Holt-Winters, Prophet
+    heuristic_baselines.py  # CN, Jaccard, Adamic-Adar, PA
+    runner.py           # Queue-based experiment runner
+    launcher.py         # Multi-session tmux orchestrator
 tests/
   test_pipeline.py      # 11 tests for the pipeline
   test_compute_features.py  # 36 tests for feature computation
+  test_baselines.py     # 32 tests for baseline pipeline
 data/
   samples/              # CSV samples for 2016-07-08 and 2016-07-09 (halving day)
   raw/                  # Raw ORBITAAL data (on dev machine only, gitignored)
@@ -246,8 +329,12 @@ orbitaal_processed/
   daily_snapshots/
     2009-01-03.parquet ... 2021-01-25.parquet  # 4401 files
   node_features/
-    2009-01-03.parquet ... 2021-01-25.parquet  # ~4100 files (empty days have no node features)
-  graph_features.csv                           # will be uploaded after all 4401 days computed
+    2009-01-03.parquet ... 2021-01-25.parquet  # 4144 файлов (257 пустых дней не имеют node features)
+  graph_features.csv                           # 4401 строка
+  experiments/                                 # Результаты экспериментов (создаётся launcher.py)
+    exp_001_link_pred_baselines/
+    exp_002_graph_level_baselines/
+    exp_003_heuristic_baselines/
 ```
 
 ### Loading processed data (code snippets)
@@ -309,57 +396,10 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
 - **Raw snapshot-day tar.gz and extracted parquet** can be deleted from the dev machine
   after confirming processed data is intact on Yandex.Disk.
 
-### Post-computation checklist (50 remaining days)
-
-After the tmux `fix` session finishes, run these commands on the dev machine:
-
-```bash
-# 1. Verify all 50 days computed
-wc -l /tmp/fix_final_out/graph_features.csv
-# Expected: 51 (50 + header)
-
-# 2. Merge into main graph_features.csv
-tail -n +2 /tmp/fix_final_out/graph_features.csv >> ~/payment-graph-forecasting/data/processed/graph_features.csv
-
-# 3. Verify total
-wc -l ~/payment-graph-forecasting/data/processed/graph_features.csv
-# Expected: 4402 (4401 + header)
-
-# 4. Verify no missing dates
-cut -d',' -f1 data/processed/graph_features.csv | tail -n +2 | sort > /tmp/done_final.txt
-ls data/processed/daily_snapshots/ | sed 's/.parquet//' | sort > /tmp/all.txt
-comm -23 /tmp/all.txt /tmp/done_final.txt | wc -l
-# Expected: 0
-
-# 5. Check node features on Yandex.Disk
-curl -s -H "Authorization: OAuth $YADISK_TOKEN" \
-  "https://cloud-api.yandex.net/v1/disk/resources?path=orbitaal_processed/node_features&fields=_embedded.total" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['_embedded']['total'])"
-# Expected: ~4100+ (257 empty days produce no node features)
-
-# 6. Upload final graph_features.csv to Yandex.Disk
-python3 -c "
-import requests, os
-token = os.environ['YADISK_TOKEN']
-h = {'Authorization': f'OAuth {token}'}
-r = requests.get('https://cloud-api.yandex.net/v1/disk/resources/upload', headers=h,
-    params={'path': 'orbitaal_processed/graph_features.csv', 'overwrite': 'true'})
-href = r.json()['href']
-with open('data/processed/graph_features.csv', 'rb') as f:
-    requests.put(href, headers=h, data=f)
-print('Uploaded graph_features.csv')
-"
-
-# 7. Clean up temp files
-rm -rf /tmp/fix_final /tmp/fix_final_out /tmp/fix_worker* /tmp/fix_out_* /tmp/missing*.txt /tmp/done*.txt /tmp/all.txt
-```
-
-After all checks pass: **delete the "Status:" block from the "Feature computation pipeline" section above.**
-
 ---
 
 ## Open questions
 
-1. Which task formulation to prioritize? (Graph-level forecasting is easiest to start; link prediction is most impactful)
-2. Which baselines to implement first? (SARIMAX on daily_stats for graph-level; heuristic methods for link prediction)
-3. How to handle the pre-2010 period with sparse/empty graphs? (Likely just filter to 2010+ or 2010-07-17+)
+1. ~~Which baselines to implement first?~~ **Done** — LP (LogReg/CatBoost/RF), graph-level (ARIMA/SARIMAX/Prophet), heuristic (CN/Jaccard/AA/PA).
+2. How to handle the pre-2010 period with sparse/empty graphs? (Likely just filter to 2010+ or 2010-07-17+)
+3. Next steps after baselines: GNN models (GraphSAGE, GAT), Node2Vec embeddings, temporal GNNs?
