@@ -37,20 +37,20 @@ NODE_FEATURE_COLUMNS = [
 GRAPH_FORECAST_TARGETS = ["num_nodes", "num_edges", "total_btc", "total_usd"]
 
 LOGREG_HP_GRID = {
-    "C": [0.01, 0.1, 1.0, 10.0, 100.0],
+    "C": [0.01, 0.1, 1.0, 10.0],
     "penalty": ["l1", "l2"],
 }
 
 CATBOOST_HP_GRID = {
-    "iterations": [100, 300, 500],
+    "iterations": [200, 500],
     "depth": [4, 6, 8],
-    "learning_rate": [0.03, 0.05, 0.1],
+    "learning_rate": [0.05, 0.1],
 }
 
 RF_HP_GRID = {
-    "n_estimators": [100, 200, 300],
-    "max_depth": [None, 10, 20],
-    "min_samples_leaf": [1, 5, 10],
+    "n_estimators": [100, 300],
+    "max_depth": [10, 20, 30],
+    "min_samples_leaf": [1, 5],
 }
 
 K_VALUES = [100, 500, 1000, 5000, 10000]
@@ -74,7 +74,9 @@ class ExperimentConfig:
     mode: str = "A"
     models: List[str] = field(default_factory=lambda: ["logreg", "catboost", "rf"])
     feature_mode: str = "extended"
-    max_train_samples: int = 5_000_000
+    max_train_samples: int = 2_000_000
+    hp_search_max_samples: int = 500_000
+    retrain_interval: int = 5
     train_ratio: float = 0.6
     val_ratio: float = 0.2
     random_seed: int = 42

@@ -136,7 +136,10 @@ local copies to conserve disk space. Supports resume (skips already processed da
 
 **Периоды:** 10 блоков по ~90 дней из разных эпох Bitcoin (2012–2020).
 Окна агрегации: W ∈ {3, 7, 14, 30}. Feature modes: base (50 фичей) и extended (100 фичей).
-HP search встроен в пайплайн (grid search по val-метрике PR-AUC).
+HP search встроен в пайплайн (grid search по val-метрике PR-AUC на подвыборке 500K сэмплов,
+финальная модель обучается на полном датасете до 2M сэмплов).
+Mode B: retrain каждые 5 дней (retrain_interval=5), не каждый день.
+HP grids: LogReg 8, CatBoost 12, RF 12 комбинаций. Расчётное время: ~16-20 ч на 4 сессиях.
 
 **Модули:**
 - `src/yadisk_utils.py` — download/upload с Яндекс.Диска (retry, рекурсивные папки)
@@ -157,10 +160,10 @@ cd ~/payment-graph-forecasting && git pull
 source venv/bin/activate && pip install -r requirements.txt
 PYTHONPATH=. python -m pytest tests/test_baselines.py -v
 export YADISK_TOKEN="..."
-PYTHONPATH=. python src/baselines/launcher.py --sessions 8
+PYTHONPATH=. python src/baselines/launcher.py --sessions 4
 ```
 
-**Мониторинг:** `tmux ls`, `tail -f /tmp/baseline_logs/session_N.log`
+**Мониторинг:** `tmux ls`, `tail -f /tmp/baseline_logs/baseline_N.log`
 **Resume:** при перезапуске runner пропускает эксперименты с готовым `summary.json`.
 **Ошибки:** записываются в `error.txt` в папке эксперимента, runner переходит к следующему.
 
