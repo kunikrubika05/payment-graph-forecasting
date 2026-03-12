@@ -298,12 +298,13 @@ def _create_model(model_name: str, params: dict):
     """Create a model instance with given hyperparameters."""
     if model_name == "logreg":
         l1_ratio = 1.0 if params["penalty"] == "l1" else 0.0
+        solver = "saga" if params["penalty"] == "l1" else "lbfgs"
         return LogisticRegression(
             C=params["C"],
             l1_ratio=l1_ratio,
-            solver="saga",
+            solver=solver,
             class_weight="balanced",
-            max_iter=1000,
+            max_iter=300,
             random_state=42,
         )
     elif model_name == "catboost":
@@ -541,6 +542,26 @@ def run_link_prediction_mode_a(config: ExperimentConfig, token: str) -> None:
         exp_logger.log_feature_correlations(corr_df)
         exp_logger.log_high_correlations(corr_df)
 
+    hp_max = config.hp_search_max_samples
+    if len(X_train) > hp_max:
+        rng_hp = np.random.RandomState(config.random_seed + 999)
+        hp_idx = rng_hp.choice(len(X_train), hp_max, replace=False)
+        X_train_hp = X_train[hp_idx]
+        y_train_hp = y_train[hp_idx]
+        logger.info("HP search subsample: %d / %d samples", hp_max, len(X_train))
+    else:
+        X_train_hp = X_train
+        y_train_hp = y_train
+
+    if len(X_val) > hp_max:
+        rng_hp2 = np.random.RandomState(config.random_seed + 998)
+        hp_idx2 = rng_hp2.choice(len(X_val), hp_max, replace=False)
+        X_val_hp = X_val[hp_idx2]
+        y_val_hp = y_val[hp_idx2]
+    else:
+        X_val_hp = X_val
+        y_val_hp = y_val
+
     all_hp_results = []
     best_models = {}
     all_importance = {}
@@ -548,25 +569,29 @@ def run_link_prediction_mode_a(config: ExperimentConfig, token: str) -> None:
     for model_name in config.models:
         logger.info("=== HP search for %s ===", model_name)
 
-        if len(y_val) > 0:
-            best_model, best_params, hp_results = hp_search(
-                model_name, X_train, y_train, X_val, y_val
+        if len(y_val_hp) > 0:
+            _, best_params, hp_results = hp_search(
+                model_name, X_train_hp, y_train_hp, X_val_hp, y_val_hp
             )
         else:
             best_params = _default_params(model_name)
-            best_model = _create_model(model_name, best_params)
-            best_model = _fit_model(best_model, model_name, X_train, y_train)
             hp_results = [{"model": model_name, "params": best_params, "note": "no val data"}]
 
         all_hp_results.extend(hp_results)
 
-        if best_model is not None:
-            best_models[model_name] = (best_model, best_params)
-            importance = get_feature_importance(best_model, model_name, feature_names)
-            all_importance.update(importance)
+        logger.info("Training final %s on full %d samples with best params %s",
+                     model_name, len(X_train), best_params)
+        best_model = _create_model(model_name, best_params)
+        best_model = _fit_model(best_model, model_name, X_train, y_train)
 
-            ext = ".cbm" if model_name == "catboost" else ".pkl"
-            exp_logger.save_model(best_model, f"best_{model_name}{ext}")
+        best_models[model_name] = (best_model, best_params)
+        importance = get_feature_importance(best_model, model_name, feature_names)
+        all_importance.update(importance)
+
+        ext = ".cbm" if model_name == "catboost" else ".pkl"
+        exp_logger.save_model(best_model, f"best_{model_name}{ext}")
+
+    del X_train_hp, y_train_hp, X_val_hp, y_val_hp
 
     exp_logger.log_hp_search(all_hp_results)
     exp_logger.log_feature_importance(all_importance)
@@ -728,7 +753,9 @@ def run_link_prediction_mode_b(config: ExperimentConfig, token: str) -> None:
         model = _fit_model(model, model_name, X_cumulative, y_cumulative)
         current_models[model_name] = (model, params)
 
-    for target_date in eval_dates:
+    days_since_retrain = 0
+
+    for eval_idx, target_date in enumerate(eval_dates):
         target_idx = all_dates.index(target_date)
         window_start = max(0, target_idx - config.window_size)
         window_dates = all_dates[window_start:target_idx]
@@ -791,18 +818,27 @@ def run_link_prediction_mode_b(config: ExperimentConfig, token: str) -> None:
             X_cumulative = X_cumulative[keep]
             y_cumulative = y_cumulative[keep]
 
-        for model_name in config.models:
-            params = current_models[model_name][1]
-            model = _create_model(model_name, params)
-            model = _fit_model(model, model_name, X_cumulative, y_cumulative)
-            current_models[model_name] = (model, params)
+        days_since_retrain += 1
+        should_retrain = (
+            days_since_retrain >= config.retrain_interval
+            or eval_idx == len(eval_dates) - 1
+        )
+
+        if should_retrain:
+            for model_name in config.models:
+                params = current_models[model_name][1]
+                model = _create_model(model_name, params)
+                model = _fit_model(model, model_name, X_cumulative, y_cumulative)
+                current_models[model_name] = (model, params)
+            days_since_retrain = 0
 
         del features_by_date, window_snapshots, node_feat_agg
         gc.collect()
 
         logger.info(
-            "  %s (cumulative=%d): %s",
+            "  %s (cumulative=%d, retrained=%s): %s",
             target_date, len(y_cumulative),
+            "yes" if should_retrain else "no",
             {m: f"ROC={met[-1].get('roc_auc', 0):.4f}" for m, met in all_test_metrics.items() if met},
         )
 
