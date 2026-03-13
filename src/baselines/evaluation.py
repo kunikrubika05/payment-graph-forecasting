@@ -3,87 +3,46 @@
 import numpy as np
 from typing import List, Optional, Dict
 
-from sklearn.metrics import (
-    roc_auc_score,
-    average_precision_score,
-    precision_recall_curve,
-    f1_score,
-)
 
-
-def compute_classification_metrics(
-    y_true: np.ndarray,
-    y_proba: np.ndarray,
+def compute_ranking_metrics(
+    ranks: np.ndarray,
     k_values: Optional[List[int]] = None,
 ) -> Dict[str, float]:
-    """Compute classification metrics for link prediction.
+    """Compute ranking metrics from per-query ranks (TGB-style protocol).
+
+    Each rank represents the position (1-based) of the true destination
+    within a per-source candidate set.
 
     Args:
-        y_true: Binary ground truth labels.
-        y_proba: Predicted probabilities for positive class.
-        k_values: List of K values for Precision@K / Recall@K.
-            If None, uses [100, 500, 1000, 5000, 10000, n_positive].
+        ranks: Array of 1-based ranks for each query (positive edge).
+        k_values: List of K values for Hits@K. Defaults to [1, 3, 10].
 
     Returns:
-        Dictionary with all computed metrics.
+        Dictionary with MRR, Hits@K for each K, and statistics.
     """
-    n_positive = int(y_true.sum())
-    n_negative = len(y_true) - n_positive
+    if len(ranks) == 0:
+        return {
+            "n_queries": 0,
+            "mrr": float("nan"),
+            "hits@1": float("nan"),
+            "hits@3": float("nan"),
+            "hits@10": float("nan"),
+        }
 
     if k_values is None:
-        k_values = [100, 500, 1000, 5000, 10000, n_positive]
-    else:
-        k_values = list(k_values) + [n_positive]
+        k_values = [1, 3, 10]
 
-    k_values = sorted(set(k for k in k_values if 0 < k <= len(y_true)))
+    ranks = np.asarray(ranks, dtype=np.float64)
 
     metrics = {
-        "n_samples": len(y_true),
-        "n_positive": n_positive,
-        "n_negative": n_negative,
-        "pos_ratio": n_positive / len(y_true) if len(y_true) > 0 else 0.0,
+        "n_queries": len(ranks),
+        "mrr": float(np.mean(1.0 / ranks)),
+        "mean_rank": float(np.mean(ranks)),
+        "median_rank": float(np.median(ranks)),
     }
 
-    if n_positive == 0 or n_negative == 0:
-        metrics["roc_auc"] = float("nan")
-        metrics["pr_auc"] = float("nan")
-        metrics["f1_optimal"] = float("nan")
-        metrics["optimal_threshold"] = float("nan")
-        return metrics
-
-    metrics["roc_auc"] = float(roc_auc_score(y_true, y_proba))
-    metrics["pr_auc"] = float(average_precision_score(y_true, y_proba))
-
-    precision_curve, recall_curve, thresholds = precision_recall_curve(y_true, y_proba)
-    f1_scores = np.where(
-        (precision_curve + recall_curve) > 0,
-        2 * precision_curve * recall_curve / (precision_curve + recall_curve),
-        0.0,
-    )
-    best_idx = np.argmax(f1_scores)
-    metrics["f1_optimal"] = float(f1_scores[best_idx])
-    metrics["optimal_threshold"] = float(
-        thresholds[best_idx] if best_idx < len(thresholds) else 0.5
-    )
-
-    ranked_indices = np.argsort(-y_proba)
-    sorted_labels = y_true[ranked_indices]
-
     for k in k_values:
-        top_k_labels = sorted_labels[:k]
-        tp_at_k = int(top_k_labels.sum())
-        prec_k = tp_at_k / k
-        rec_k = tp_at_k / n_positive if n_positive > 0 else 0.0
-        suffix = f"@{k}" if k != n_positive else "@n_pos"
-        metrics[f"precision{suffix}"] = float(prec_k)
-        metrics[f"recall{suffix}"] = float(rec_k)
-
-    reciprocal_ranks = []
-    for i, idx in enumerate(ranked_indices):
-        if y_true[idx] == 1:
-            reciprocal_ranks.append(1.0 / (i + 1))
-            break
-    metrics["mrr"] = float(reciprocal_ranks[0]) if reciprocal_ranks else 0.0
+        metrics[f"hits@{k}"] = float(np.mean(ranks <= k))
 
     return metrics
 

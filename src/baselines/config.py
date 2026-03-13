@@ -53,9 +53,6 @@ RF_HP_GRID = {
     "min_samples_leaf": [1, 5],
 }
 
-K_VALUES = [100, 500, 1000, 5000, 10000]
-
-
 @dataclass
 class ExperimentConfig:
     """Configuration for a single baseline experiment."""
@@ -70,7 +67,7 @@ class ExperimentConfig:
     aggregation: str = "mean"
     decay_lambda: float = 0.3
     negative_ratio: int = 5
-    negative_strategy: str = "random"
+    n_negatives: int = 100
     mode: str = "A"
     models: List[str] = field(default_factory=lambda: ["logreg", "catboost", "rf"])
     feature_mode: str = "extended"
@@ -96,7 +93,6 @@ class ExperimentConfig:
                 f"period_{self.period_name}",
                 f"w{self.window_size}",
                 self.aggregation,
-                f"{self.negative_strategy}neg",
                 f"mode{self.mode}",
             ]
             self.sub_experiment = "_".join(parts)

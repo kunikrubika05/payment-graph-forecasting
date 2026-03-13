@@ -129,14 +129,24 @@ local copies to conserve disk space. Supports resume (skips already processed da
 **Задачи:**
 1. **Link Prediction** — LogReg, CatBoost, RandomForest на агрегированных node features.
    Sliding window (W дней → предсказание рёбер дня W+1). Два режима: A (единая модель)
-   и B (live-update). Два типа negative sampling: random и historical.
+   и B (live-update). Per-source negative sampling: 50/50 historical + random.
 2. **Graph-level Forecasting** — ARIMA, SARIMAX, Holt-Winters, Prophet, naive baselines
    на временных рядах из `graph_features.csv` (num_nodes, num_edges, total_btc, total_usd).
 3. **Heuristic Link Prediction** — Common Neighbors, Jaccard, Adamic-Adar, Preferential Attachment.
 
+**Протокол оценки (TGB-style):**
+- Per-source ranking: для каждого positive edge (s, d_true) фиксируется s, строится candidate
+  set {d_true} ∪ {neg_1, ..., neg_q}, модель ранжирует кандидатов, ранг d_true → метрики.
+- n_negatives=100 (per TGB standard для больших графов, как tgbl-coin).
+- Negative sampling: 50% historical (соседи из окна, отсутствующие в target day) + 50% random.
+- Метрики: filtered MRR (primary), Hits@1, Hits@3, Hits@10 — per-query, усреднённые.
+- Обучение: бинарная классификация (pos+neg пары) с per-source historical+random negatives.
+- Референсные значения (TGB tgbl-coin): PA=0.481, PA_rec=0.584, TGN=0.586, PopTrack=0.725 (MRR).
+- Подробнее: `docs/evaluation_protocols_temporal_lp_ru.md`.
+
 **Периоды:** 10 блоков по ~90 дней из разных эпох Bitcoin (2012–2020).
 Окна агрегации: W ∈ {3, 7, 14, 30}. Feature modes: base (50 фичей) и extended (100 фичей).
-HP search встроен в пайплайн (grid search по val-метрике PR-AUC на подвыборке 500K сэмплов,
+HP search встроен в пайплайн (grid search по val-метрике MRR на подвыборке 500K сэмплов,
 финальная модель обучается на полном датасете до 2M сэмплов).
 Mode B: retrain каждые 5 дней (retrain_interval=5), не каждый день.
 HP grids: LogReg 8, CatBoost 12, RF 12 комбинаций. Расчётное время: ~16-20 ч на 4 сессиях.
@@ -146,7 +156,7 @@ HP grids: LogReg 8, CatBoost 12, RF 12 комбинаций. Расчётное 
 - `src/baselines/config.py` — конфигурация экспериментов (периоды, HP-сетки, ExperimentConfig)
 - `src/baselines/data_loader.py` — загрузка node_features и daily_snapshots с Я.Диска
 - `src/baselines/feature_engineering.py` — mean/time-weighted агрегация, pair features
-- `src/baselines/evaluation.py` — ROC-AUC, PR-AUC, Precision@K, Recall@K, F1, MRR, MAE, RMSE, MAPE
+- `src/baselines/evaluation.py` — ranking metrics (MRR, Hits@K), time series metrics (MAE, RMSE, MAPE, sMAPE)
 - `src/baselines/experiment_logger.py` — config.json, metrics.jsonl, summary.json, модели, предсказания
 - `src/baselines/link_prediction.py` — LP pipeline (Mode A + Mode B)
 - `src/baselines/graph_forecasting.py` — time series forecasting pipeline
@@ -171,7 +181,7 @@ PYTHONPATH=. python src/baselines/launcher.py --sessions 4
 ```
 orbitaal_processed/experiments/
   exp_001_link_pred_baselines/
-    period_mid_2015q3_w7_mean_randomneg_modeA/
+    period_mid_2015q3_w7_mean_modeA/
       config.json, metrics.jsonl, summary.json
       hp_search_results.json, feature_importance.json
       feature_correlations.csv, high_correlations.json
@@ -183,12 +193,12 @@ orbitaal_processed/experiments/
 
 ### Tests
 
-79 tests total — all passing:
+82 tests total — all passing:
 - `tests/test_pipeline.py` — 11 tests for the data pipeline
 - `tests/test_compute_features.py` — 36 tests for feature computation (correctness,
   disk cleanup, resume, edge cases)
-- `tests/test_baselines.py` — 32 tests for baseline pipeline (feature engineering,
-  evaluation metrics, experiment logger, link prediction helpers, heuristic helpers)
+- `tests/test_baselines.py` — 35 tests for baseline pipeline (feature engineering,
+  ranking metrics, experiment logger, config, link prediction helpers, heuristic helpers)
 
 ---
 
@@ -269,10 +279,12 @@ Branch naming: `feature/<name>`, `fix/<name>`, `experiment/<name>`
 
 - **Write tests** for any new functionality. Place them in `tests/`.
 - Run `pytest tests/ -v` before proposing changes as ready.
-- Use the project's virtual environment (venv). Do NOT use system pip.
+- **Always activate venv** before running any Python commands: `source venv/bin/activate && PYTHONPATH=. <command>`. Do NOT use system Python or pip.
 - **Write docstrings** for all public functions, classes, and modules (Google style).
 - **Do NOT write inline comments.** Code should be self-explanatory. Docstrings only.
 - Maintain documentation in `docs/` as the project grows (see `docs/README.md`).
+- **Update documentation** when implementing new features or changing protocols. This includes:
+  updating CLAUDE.md (with user approval), relevant docs in `docs/`, and test descriptions.
 - Communicate with the user in Russian.
 
 ### Logging and progress

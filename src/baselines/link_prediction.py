@@ -1,4 +1,12 @@
-"""Link prediction baseline pipeline: LogReg, CatBoost, RandomForest."""
+"""Link prediction baseline pipeline with TGB-style ranking evaluation.
+
+Evaluation protocol (per TGB/DGB best practices):
+- Per-source ranking: for each positive edge (s, d, t), fix source s,
+  build candidate set {d_true} ∪ {neg_1, ..., neg_q}, rank candidates.
+- Negatives: 50/50 mix of historical (edges from window absent in target day)
+  and random (uniform from active nodes).
+- Metrics: MRR, Hits@1, Hits@3, Hits@10 (per-query, averaged).
+"""
 
 import gc
 import logging
@@ -9,12 +17,13 @@ from typing import Dict, List, Set, Tuple, Optional
 
 import numpy as np
 import pandas as pd
+from scipy import sparse
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 
 from src.baselines.config import (
     ExperimentConfig, NODE_FEATURE_COLUMNS,
-    LOGREG_HP_GRID, CATBOOST_HP_GRID, RF_HP_GRID, K_VALUES,
+    LOGREG_HP_GRID, CATBOOST_HP_GRID, RF_HP_GRID,
 )
 from src.baselines.data_loader import (
     get_available_dates, download_period_data, load_node_features,
@@ -24,7 +33,7 @@ from src.baselines.feature_engineering import (
     aggregate_features_mean, aggregate_features_time_weighted,
     build_pair_features, compute_feature_correlations, get_feature_names,
 )
-from src.baselines.evaluation import compute_classification_metrics
+from src.baselines.evaluation import compute_ranking_metrics
 from src.baselines.experiment_logger import ExperimentLogger
 
 logger = logging.getLogger(__name__)
@@ -47,173 +56,347 @@ def _get_active_nodes(snapshots: Dict[str, pd.DataFrame]) -> np.ndarray:
     return np.array(sorted(nodes))
 
 
-def sample_negatives_random(
-    positive_edges: Set[Tuple[int, int]],
+def _get_source_neighbors(snapshots: Dict[str, pd.DataFrame]) -> Dict[int, Set[int]]:
+    """Build per-source neighbor sets from window snapshots (historical edges)."""
+    neighbors: Dict[int, Set[int]] = {}
+    for snap in snapshots.values():
+        if snap is None or len(snap) == 0:
+            continue
+        for s, d in zip(snap["src_idx"].values, snap["dst_idx"].values):
+            if s not in neighbors:
+                neighbors[s] = set()
+            neighbors[s].add(d)
+    return neighbors
+
+
+def sample_negatives_per_source(
+    source: int,
+    true_dst: int,
+    historical_neighbors: Set[int],
+    target_edges_from_source: Set[int],
     active_nodes: np.ndarray,
-    n_samples: int,
-    seed: int,
+    n_negatives: int,
+    rng: np.random.RandomState,
 ) -> np.ndarray:
-    """Sample random negative edges (pairs not in positive set).
+    """Sample negatives for one source node (TGB-style 50/50 mix).
 
     Args:
-        positive_edges: Set of (src, dst) tuples that are positive.
-        active_nodes: Array of active node indices.
-        n_samples: Number of negative samples to generate.
-        seed: Random seed.
+        source: Source node index.
+        true_dst: True destination (excluded from negatives).
+        historical_neighbors: Destinations this source connected to in the window.
+        target_edges_from_source: Destinations this source connects to on target day.
+        active_nodes: All active nodes in the window.
+        n_negatives: Number of negative destinations to sample.
+        rng: Random state.
 
     Returns:
-        Array of shape (n_actual_samples, 2) with (src, dst) pairs.
+        Array of negative destination node indices.
     """
-    rng = np.random.RandomState(seed)
-    n_nodes = len(active_nodes)
-    if n_nodes < 2:
-        return np.empty((0, 2), dtype=np.int64)
+    n_hist = n_negatives // 2
+    n_rand = n_negatives - n_hist
 
-    negatives = []
-    batch_size = min(n_samples * 3, 10_000_000)
-    attempts = 0
-    max_attempts = 10
+    hist_candidates = historical_neighbors - target_edges_from_source
+    hist_candidates.discard(source)
 
-    while len(negatives) < n_samples and attempts < max_attempts:
-        src_idx = rng.randint(0, n_nodes, size=batch_size)
-        dst_idx = rng.randint(0, n_nodes, size=batch_size)
+    hist_negatives = []
+    if hist_candidates:
+        hist_arr = np.array(list(hist_candidates), dtype=np.int64)
+        if len(hist_arr) >= n_hist:
+            idx = rng.choice(len(hist_arr), n_hist, replace=False)
+            hist_negatives = hist_arr[idx].tolist()
+        else:
+            hist_negatives = hist_arr.tolist()
+            n_rand += n_hist - len(hist_negatives)
 
-        mask = src_idx != dst_idx
-        src_idx = src_idx[mask]
-        dst_idx = dst_idx[mask]
+    exclude = target_edges_from_source | set(hist_negatives) | {source}
+    rand_negatives = []
+    if n_rand > 0 and len(active_nodes) > len(exclude):
+        attempts = 0
+        while len(rand_negatives) < n_rand and attempts < 5:
+            batch = rng.choice(active_nodes, size=min(n_rand * 3, len(active_nodes)), replace=False)
+            for node in batch:
+                if node not in exclude:
+                    rand_negatives.append(node)
+                    exclude.add(node)
+                    if len(rand_negatives) >= n_rand:
+                        break
+            attempts += 1
 
-        src_nodes = active_nodes[src_idx]
-        dst_nodes = active_nodes[dst_idx]
-
-        for s, d in zip(src_nodes, dst_nodes):
-            if (s, d) not in positive_edges:
-                negatives.append((s, d))
-                if len(negatives) >= n_samples:
-                    break
-        attempts += 1
-
-    if not negatives:
-        return np.empty((0, 2), dtype=np.int64)
-    return np.array(negatives[:n_samples], dtype=np.int64)
-
-
-def sample_negatives_historical(
-    positive_edges: Set[Tuple[int, int]],
-    historical_edges: Set[Tuple[int, int]],
-    n_samples: int,
-    seed: int,
-) -> np.ndarray:
-    """Sample historical negatives: edges from window that are absent in target day.
-
-    Args:
-        positive_edges: Edges in the target day.
-        historical_edges: Edges from the window period.
-        n_samples: Number of samples to generate.
-        seed: Random seed.
-
-    Returns:
-        Array of shape (n_actual_samples, 2) with (src, dst) pairs.
-    """
-    candidates = historical_edges - positive_edges
-    if not candidates:
-        return np.empty((0, 2), dtype=np.int64)
-
-    candidates_arr = np.array(list(candidates), dtype=np.int64)
-    rng = np.random.RandomState(seed)
-
-    if len(candidates_arr) <= n_samples:
-        return candidates_arr
-
-    indices = rng.choice(len(candidates_arr), size=n_samples, replace=False)
-    return candidates_arr[indices]
+    all_negatives = hist_negatives + rand_negatives
+    if not all_negatives:
+        return np.array([], dtype=np.int64)
+    return np.array(all_negatives, dtype=np.int64)
 
 
-def prepare_day_samples(
+def evaluate_ranking_for_day(
+    model,
+    model_name: str,
     target_snapshot: pd.DataFrame,
     node_features_agg: pd.DataFrame,
-    historical_edges: Set[Tuple[int, int]],
+    historical_neighbors: Dict[int, Set[int]],
     active_nodes: np.ndarray,
     config: ExperimentConfig,
     seed: int,
-) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
-    """Prepare feature matrix and labels for one target day.
+) -> Tuple[np.ndarray, int]:
+    """Evaluate model on one day using per-source ranking protocol.
+
+    For each positive edge (s, d, t):
+      1. Fix source s, build candidate set {d} ∪ {neg_1, ..., neg_q}
+      2. Score all candidates, determine rank of d
+      3. Collect rank
 
     Args:
+        model: Trained model.
+        model_name: Model type string.
         target_snapshot: Edge list for the target day.
         node_features_agg: Aggregated node features from the window.
-        historical_edges: Set of edges from the window period.
+        historical_neighbors: Per-source historical neighbor sets.
         active_nodes: Array of active nodes in the window.
         config: Experiment configuration.
         seed: Random seed.
 
     Returns:
-        Tuple of (X, y, pairs_df).
-        X: Feature matrix (n_samples, n_features).
-        y: Binary labels.
-        pairs_df: DataFrame with src, dst, label columns.
+        Tuple of (ranks_array, n_skipped).
     """
+    rng = np.random.RandomState(seed)
     target_edges = _get_edges_set(target_snapshot)
-
     known_nodes = set(node_features_agg.index)
-    valid_positive_edges = [
-        (s, d) for s, d in target_edges
-        if s in known_nodes and d in known_nodes
-    ]
 
-    if not valid_positive_edges:
-        empty_x = np.empty((0, len(get_feature_names(config.feature_mode))))
-        return empty_x, np.array([]), pd.DataFrame(columns=["src", "dst", "label"])
+    src_to_dsts: Dict[int, Set[int]] = {}
+    for s, d in target_edges:
+        if s not in src_to_dsts:
+            src_to_dsts[s] = set()
+        src_to_dsts[s].add(d)
 
-    pos_arr = np.array(valid_positive_edges, dtype=np.int64)
-    n_pos = len(pos_arr)
-    n_neg = n_pos * config.negative_ratio
+    ranks = []
+    n_skipped = 0
 
-    valid_edges_set = set(valid_positive_edges)
+    for source, destinations in src_to_dsts.items():
+        if source not in known_nodes:
+            n_skipped += len(destinations)
+            continue
 
-    if config.negative_strategy == "random":
-        neg_arr = sample_negatives_random(
-            target_edges, active_nodes, n_neg, seed
-        )
-    elif config.negative_strategy == "historical":
-        neg_arr = sample_negatives_historical(
-            target_edges, historical_edges, n_neg, seed
-        )
-    elif config.negative_strategy == "both":
-        n_random = n_neg // 2
-        n_hist = n_neg - n_random
-        neg_random = sample_negatives_random(
-            target_edges, active_nodes, n_random, seed
-        )
-        neg_hist = sample_negatives_historical(
-            target_edges, historical_edges, n_hist, seed + 1
-        )
-        neg_arr = np.vstack([neg_random, neg_hist]) if len(neg_random) > 0 and len(neg_hist) > 0 else (
-            neg_random if len(neg_random) > 0 else neg_hist
-        )
-    else:
-        raise ValueError(f"Unknown negative strategy: {config.negative_strategy}")
+        hist_nbrs = historical_neighbors.get(source, set())
 
-    if len(neg_arr) == 0:
-        neg_arr = sample_negatives_random(target_edges, active_nodes, n_neg, seed)
+        for true_dst in destinations:
+            if true_dst not in known_nodes:
+                n_skipped += 1
+                continue
 
-    all_src = np.concatenate([pos_arr[:, 0], neg_arr[:, 0]])
-    all_dst = np.concatenate([pos_arr[:, 1], neg_arr[:, 1]])
-    y = np.concatenate([np.ones(n_pos), np.zeros(len(neg_arr))])
+            neg_dsts = sample_negatives_per_source(
+                source=source,
+                true_dst=true_dst,
+                historical_neighbors=hist_nbrs,
+                target_edges_from_source=destinations,
+                active_nodes=active_nodes,
+                n_negatives=config.n_negatives,
+                rng=rng,
+            )
 
-    known_mask = np.array([
-        s in known_nodes and d in known_nodes
-        for s, d in zip(all_src, all_dst)
-    ])
-    all_src = all_src[known_mask]
-    all_dst = all_dst[known_mask]
-    y = y[known_mask]
+            if len(neg_dsts) == 0:
+                n_skipped += 1
+                continue
 
-    X, feature_names = build_pair_features(
-        node_features_agg, all_src, all_dst, mode=config.feature_mode
+            valid_neg = [d for d in neg_dsts if d in known_nodes]
+            if not valid_neg:
+                n_skipped += 1
+                continue
+
+            candidate_dsts = np.array([true_dst] + valid_neg, dtype=np.int64)
+            sources = np.full(len(candidate_dsts), source, dtype=np.int64)
+
+            X, _ = build_pair_features(
+                node_features_agg, sources, candidate_dsts, mode=config.feature_mode
+            )
+
+            scores = _predict_proba(model, model_name, X)
+
+            true_score = scores[0]
+            rank = 1 + int(np.sum(scores[1:] > true_score))
+            ranks.append(rank)
+
+    return np.array(ranks, dtype=np.int64), n_skipped
+
+
+def prepare_training_samples(
+    target_snapshot: pd.DataFrame,
+    node_features_agg: pd.DataFrame,
+    historical_neighbors: Dict[int, Set[int]],
+    active_nodes: np.ndarray,
+    config: ExperimentConfig,
+    seed: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Prepare training samples for one target day (binary classification).
+
+    For training, we still use binary classification (positive + negative pairs)
+    because ranking loss is unnecessary for LogReg/CatBoost/RF baselines.
+    The key improvement is using per-source historical+random negatives
+    instead of global random negatives.
+
+    Args:
+        target_snapshot: Edge list for the target day.
+        node_features_agg: Aggregated node features from the window.
+        historical_neighbors: Per-source historical neighbor sets.
+        active_nodes: Array of active nodes in the window.
+        config: Experiment configuration.
+        seed: Random seed.
+
+    Returns:
+        Tuple of (X, y).
+    """
+    rng = np.random.RandomState(seed)
+    target_edges = _get_edges_set(target_snapshot)
+    known_nodes = set(node_features_agg.index)
+
+    src_to_dsts: Dict[int, Set[int]] = {}
+    for s, d in target_edges:
+        if s not in src_to_dsts:
+            src_to_dsts[s] = set()
+        src_to_dsts[s].add(d)
+
+    all_src = []
+    all_dst = []
+    all_labels = []
+
+    neg_per_positive = config.negative_ratio
+
+    for source, destinations in src_to_dsts.items():
+        if source not in known_nodes:
+            continue
+
+        hist_nbrs = historical_neighbors.get(source, set())
+
+        for true_dst in destinations:
+            if true_dst not in known_nodes:
+                continue
+
+            all_src.append(source)
+            all_dst.append(true_dst)
+            all_labels.append(1)
+
+            neg_dsts = sample_negatives_per_source(
+                source=source,
+                true_dst=true_dst,
+                historical_neighbors=hist_nbrs,
+                target_edges_from_source=destinations,
+                active_nodes=active_nodes,
+                n_negatives=neg_per_positive,
+                rng=rng,
+            )
+
+            for nd in neg_dsts:
+                if nd in known_nodes:
+                    all_src.append(source)
+                    all_dst.append(nd)
+                    all_labels.append(0)
+
+    if not all_src:
+        n_feat = len(get_feature_names(config.feature_mode))
+        return np.empty((0, n_feat)), np.array([])
+
+    src_arr = np.array(all_src, dtype=np.int64)
+    dst_arr = np.array(all_dst, dtype=np.int64)
+    y = np.array(all_labels, dtype=np.float64)
+
+    X, _ = build_pair_features(
+        node_features_agg, src_arr, dst_arr, mode=config.feature_mode
     )
 
-    pairs_df = pd.DataFrame({"src": all_src, "dst": all_dst, "label": y.astype(int)})
-    return X, y, pairs_df
+    return X, y
+
+
+def _load_window_data(
+    target_date: str,
+    all_dates: List[str],
+    config: ExperimentConfig,
+) -> Tuple[pd.DataFrame, Dict[int, Set[int]], np.ndarray, pd.DataFrame]:
+    """Load and aggregate window data for a target date.
+
+    Returns:
+        Tuple of (node_feat_agg, historical_neighbors, active_nodes, target_snap).
+    """
+    target_idx = all_dates.index(target_date)
+    window_start = max(0, target_idx - config.window_size)
+    window_dates = all_dates[window_start:target_idx]
+
+    features_by_date = {}
+    window_snapshots = {}
+    for d in window_dates:
+        nf = load_node_features(d, config.local_data_dir)
+        if nf is not None:
+            features_by_date[d] = nf
+        snap = load_daily_snapshot(d, config.local_data_dir)
+        if snap is not None:
+            window_snapshots[d] = snap
+
+    if not features_by_date:
+        return None, {}, np.array([]), None
+
+    if config.aggregation == "mean":
+        node_feat_agg = aggregate_features_mean(features_by_date)
+    else:
+        node_feat_agg = aggregate_features_time_weighted(
+            features_by_date, window_dates, config.decay_lambda
+        )
+
+    active_nodes = _get_active_nodes(window_snapshots)
+    historical_neighbors = _get_source_neighbors(window_snapshots)
+
+    target_snap = load_daily_snapshot(target_date, config.local_data_dir)
+
+    return node_feat_agg, historical_neighbors, active_nodes, target_snap
+
+
+def _collect_training_data(
+    dates: List[str],
+    all_dates: List[str],
+    config: ExperimentConfig,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Collect training data across multiple days."""
+    X_list = []
+    y_list = []
+    total_samples = 0
+
+    for target_date in dates:
+        node_feat_agg, hist_nbrs, active_nodes, target_snap = _load_window_data(
+            target_date, all_dates, config
+        )
+        if node_feat_agg is None or target_snap is None or len(target_snap) == 0:
+            continue
+
+        seed = config.random_seed + hash(target_date) % 10000
+        X, y = prepare_training_samples(
+            target_snap, node_feat_agg, hist_nbrs, active_nodes, config, seed
+        )
+
+        if len(y) == 0:
+            continue
+
+        X_list.append(X)
+        y_list.append(y)
+        total_samples += len(y)
+
+        del node_feat_agg, hist_nbrs
+        gc.collect()
+
+        if total_samples >= config.max_train_samples:
+            break
+
+    if not X_list:
+        n_feat = len(get_feature_names(config.feature_mode))
+        return np.empty((0, n_feat)), np.array([])
+
+    X_all = np.vstack(X_list)
+    y_all = np.concatenate(y_list)
+
+    if len(y_all) > config.max_train_samples:
+        rng = np.random.RandomState(config.random_seed)
+        indices = rng.choice(len(y_all), size=config.max_train_samples, replace=False)
+        X_all = X_all[indices]
+        y_all = y_all[indices]
+        logger.info("Subsampled to %d samples", config.max_train_samples)
+
+    return X_all, y_all
 
 
 def hp_search(
@@ -222,40 +405,29 @@ def hp_search(
     y_train: np.ndarray,
     X_val: np.ndarray,
     y_val: np.ndarray,
-) -> Tuple[object, dict, List[dict]]:
-    """Run hyperparameter grid search for a given model.
-
-    Args:
-        model_name: One of 'logreg', 'catboost', 'rf'.
-        X_train: Training features.
-        y_train: Training labels.
-        X_val: Validation features.
-        y_val: Validation labels.
+) -> Tuple[dict, List[dict]]:
+    """Run HP grid search. Uses PR-AUC on val set to select best params.
 
     Returns:
-        Tuple of (best_model, best_params, all_results).
+        Tuple of (best_params, all_results).
     """
+    from sklearn.metrics import average_precision_score
+
     if model_name == "logreg":
         grid = LOGREG_HP_GRID
-        param_combos = [
-            dict(zip(grid.keys(), v)) for v in iter_product(*grid.values())
-        ]
     elif model_name == "catboost":
         grid = CATBOOST_HP_GRID
-        param_combos = [
-            dict(zip(grid.keys(), v)) for v in iter_product(*grid.values())
-        ]
     elif model_name == "rf":
         grid = RF_HP_GRID
-        param_combos = [
-            dict(zip(grid.keys(), v)) for v in iter_product(*grid.values())
-        ]
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
+    param_combos = [
+        dict(zip(grid.keys(), v)) for v in iter_product(*grid.values())
+    ]
+
     results = []
     best_score = -1.0
-    best_model = None
     best_params = {}
 
     for params in param_combos:
@@ -266,32 +438,32 @@ def hp_search(
             train_time = time.time() - t0
 
             y_proba_val = _predict_proba(model, model_name, X_val)
-            val_metrics = compute_classification_metrics(y_val, y_proba_val, K_VALUES)
-            score = val_metrics.get("pr_auc", 0.0)
+            score = float(average_precision_score(y_val, y_proba_val))
 
             result = {
                 "model": model_name,
                 "params": params,
                 "val_pr_auc": score,
-                "val_roc_auc": val_metrics.get("roc_auc", 0.0),
                 "train_time_sec": train_time,
             }
             results.append(result)
 
             if score > best_score:
                 best_score = score
-                best_model = model
                 best_params = params
 
             logger.info(
-                "  %s %s -> val PR-AUC=%.4f, ROC-AUC=%.4f (%.1fs)",
-                model_name, params, score, val_metrics.get("roc_auc", 0.0), train_time,
+                "  %s %s -> val PR-AUC=%.4f (%.1fs)",
+                model_name, params, score, train_time,
             )
+
+            del model
+            gc.collect()
         except Exception as e:
             logger.warning("  %s %s failed: %s", model_name, params, e)
             results.append({"model": model_name, "params": params, "error": str(e)})
 
-    return best_model, best_params, results
+    return best_params, results
 
 
 def _create_model(model_name: str, params: dict):
@@ -344,24 +516,13 @@ def _fit_model(model, model_name: str, X: np.ndarray, y: np.ndarray):
 
 def _predict_proba(model, model_name: str, X: np.ndarray) -> np.ndarray:
     """Get predicted probabilities for positive class."""
-    if model_name == "catboost":
-        return model.predict_proba(X)[:, 1]
     return model.predict_proba(X)[:, 1]
 
 
 def get_feature_importance(
     model, model_name: str, feature_names: List[str]
 ) -> dict:
-    """Extract feature importance from trained model.
-
-    Args:
-        model: Trained model.
-        model_name: Model type string.
-        feature_names: List of feature names.
-
-    Returns:
-        Dict mapping model_name to {feature: importance} dict.
-    """
+    """Extract feature importance from trained model."""
     if model_name == "logreg":
         coefs = np.abs(model.coef_[0])
         importance = dict(zip(feature_names, coefs.tolist()))
@@ -376,108 +537,11 @@ def get_feature_importance(
     return {model_name: importance}
 
 
-def _collect_samples_for_days(
-    dates: List[str],
-    all_dates: List[str],
-    config: ExperimentConfig,
-    token: str,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Collect and subsample training/validation data across multiple days.
-
-    Args:
-        dates: List of target dates to collect samples from.
-        all_dates: Full ordered list of dates in the period.
-        config: Experiment config.
-        token: Yandex.Disk token.
-
-    Returns:
-        Tuple of (X_all, y_all) concatenated across all days.
-    """
-    X_list = []
-    y_list = []
-    total_samples = 0
-
-    for target_date in dates:
-        target_idx = all_dates.index(target_date)
-        window_start = max(0, target_idx - config.window_size)
-        window_dates = all_dates[window_start:target_idx]
-
-        if not window_dates:
-            continue
-
-        features_by_date = {}
-        window_snapshots = {}
-        for d in window_dates:
-            nf = load_node_features(d, config.local_data_dir)
-            if nf is not None:
-                features_by_date[d] = nf
-            snap = load_daily_snapshot(d, config.local_data_dir)
-            if snap is not None:
-                window_snapshots[d] = snap
-
-        if not features_by_date:
-            continue
-
-        if config.aggregation == "mean":
-            node_feat_agg = aggregate_features_mean(features_by_date)
-        else:
-            node_feat_agg = aggregate_features_time_weighted(
-                features_by_date, window_dates, config.decay_lambda
-            )
-
-        active_nodes = _get_active_nodes(window_snapshots)
-        historical_edges = set()
-        for snap in window_snapshots.values():
-            historical_edges.update(_get_edges_set(snap))
-
-        target_snap = load_daily_snapshot(target_date, config.local_data_dir)
-        if target_snap is None or len(target_snap) == 0:
-            continue
-
-        seed = config.random_seed + hash(target_date) % 10000
-        X, y, _ = prepare_day_samples(
-            target_snap, node_feat_agg, historical_edges, active_nodes, config, seed
-        )
-
-        if len(y) == 0:
-            continue
-
-        X_list.append(X)
-        y_list.append(y)
-        total_samples += len(y)
-
-        del features_by_date, window_snapshots, node_feat_agg
-        gc.collect()
-
-        if total_samples >= config.max_train_samples:
-            break
-
-    if not X_list:
-        n_feat = len(get_feature_names(config.feature_mode))
-        return np.empty((0, n_feat)), np.array([])
-
-    X_all = np.vstack(X_list)
-    y_all = np.concatenate(y_list)
-
-    if len(y_all) > config.max_train_samples:
-        rng = np.random.RandomState(config.random_seed)
-        indices = rng.choice(len(y_all), size=config.max_train_samples, replace=False)
-        X_all = X_all[indices]
-        y_all = y_all[indices]
-        logger.info("Subsampled to %d samples", config.max_train_samples)
-
-    return X_all, y_all
-
-
 def run_link_prediction_mode_a(config: ExperimentConfig, token: str) -> None:
-    """Run link prediction in Mode A: single model trained on all train days.
+    """Run link prediction Mode A: train on train days, HP search on val, eval on test.
 
-    Args:
-        config: Experiment configuration.
-        token: Yandex.Disk OAuth token.
+    Evaluation uses per-source ranking protocol (TGB-style).
     """
-    from datetime import timedelta
-
     output_dir = os.path.join(
         config.output_dir or f"/tmp/baseline_results/{config.experiment_name}",
         config.sub_experiment,
@@ -516,22 +580,20 @@ def run_link_prediction_mode_a(config: ExperimentConfig, token: str) -> None:
     logger.info("Downloading data from Yandex.Disk...")
     download_period_data(all_dates, config.local_data_dir, token)
 
-    logger.info("Collecting training samples...")
-    X_train, y_train = _collect_samples_for_days(
-        train_dates, all_dates, config, token
-    )
+    logger.info("Collecting training samples (per-source negatives)...")
+    X_train, y_train = _collect_training_data(train_dates, all_dates, config)
     if len(y_train) == 0:
         logger.error("No training samples collected, aborting")
         exp_logger.close()
         return
 
-    logger.info("Training set: %d samples (%.1f%% positive)",
-                len(y_train), y_train.mean() * 100)
+    pos_count = int(y_train.sum())
+    logger.info("Training set: %d samples (%d pos, %d neg, ratio=%.3f)",
+                len(y_train), pos_count, len(y_train) - pos_count,
+                pos_count / len(y_train))
 
     logger.info("Collecting validation samples...")
-    X_val, y_val = _collect_samples_for_days(
-        val_dates, all_dates, config, token
-    )
+    X_val, y_val = _collect_training_data(val_dates, all_dates, config)
     logger.info("Validation set: %d samples", len(y_val))
 
     feature_names = get_feature_names(config.feature_mode)
@@ -543,24 +605,22 @@ def run_link_prediction_mode_a(config: ExperimentConfig, token: str) -> None:
         exp_logger.log_high_correlations(corr_df)
 
     hp_max = config.hp_search_max_samples
+    X_train_hp = X_train
+    y_train_hp = y_train
     if len(X_train) > hp_max:
         rng_hp = np.random.RandomState(config.random_seed + 999)
         hp_idx = rng_hp.choice(len(X_train), hp_max, replace=False)
         X_train_hp = X_train[hp_idx]
         y_train_hp = y_train[hp_idx]
-        logger.info("HP search subsample: %d / %d samples", hp_max, len(X_train))
-    else:
-        X_train_hp = X_train
-        y_train_hp = y_train
+        logger.info("HP search subsample: %d / %d", hp_max, len(X_train))
 
+    X_val_hp = X_val
+    y_val_hp = y_val
     if len(X_val) > hp_max:
         rng_hp2 = np.random.RandomState(config.random_seed + 998)
         hp_idx2 = rng_hp2.choice(len(X_val), hp_max, replace=False)
         X_val_hp = X_val[hp_idx2]
         y_val_hp = y_val[hp_idx2]
-    else:
-        X_val_hp = X_val
-        y_val_hp = y_val
 
     all_hp_results = []
     best_models = {}
@@ -570,7 +630,7 @@ def run_link_prediction_mode_a(config: ExperimentConfig, token: str) -> None:
         logger.info("=== HP search for %s ===", model_name)
 
         if len(y_val_hp) > 0:
-            _, best_params, hp_results = hp_search(
+            best_params, hp_results = hp_search(
                 model_name, X_train_hp, y_train_hp, X_val_hp, y_val_hp
             )
         else:
@@ -592,97 +652,56 @@ def run_link_prediction_mode_a(config: ExperimentConfig, token: str) -> None:
         exp_logger.save_model(best_model, f"best_{model_name}{ext}")
 
     del X_train_hp, y_train_hp, X_val_hp, y_val_hp
-
     exp_logger.log_hp_search(all_hp_results)
     exp_logger.log_feature_importance(all_importance)
 
     del X_train, y_train, X_val, y_val
     gc.collect()
 
-    logger.info("=== Evaluating on test days ===")
-    all_test_metrics = {m: [] for m in best_models}
+    logger.info("=== Ranking evaluation on test days ===")
+    all_test_ranks = {m: [] for m in best_models}
 
     for target_date in test_dates:
-        target_idx = all_dates.index(target_date)
-        window_start = max(0, target_idx - config.window_size)
-        window_dates = all_dates[window_start:target_idx]
-
-        if not window_dates:
-            continue
-
-        features_by_date = {}
-        window_snapshots = {}
-        for d in window_dates:
-            nf = load_node_features(d, config.local_data_dir)
-            if nf is not None:
-                features_by_date[d] = nf
-            snap = load_daily_snapshot(d, config.local_data_dir)
-            if snap is not None:
-                window_snapshots[d] = snap
-
-        if not features_by_date:
-            continue
-
-        if config.aggregation == "mean":
-            node_feat_agg = aggregate_features_mean(features_by_date)
-        else:
-            node_feat_agg = aggregate_features_time_weighted(
-                features_by_date, window_dates, config.decay_lambda
-            )
-
-        active_nodes = _get_active_nodes(window_snapshots)
-        historical_edges = set()
-        for snap in window_snapshots.values():
-            historical_edges.update(_get_edges_set(snap))
-
-        target_snap = load_daily_snapshot(target_date, config.local_data_dir)
-        if target_snap is None or len(target_snap) == 0:
+        node_feat_agg, hist_nbrs, active_nodes, target_snap = _load_window_data(
+            target_date, all_dates, config
+        )
+        if node_feat_agg is None or target_snap is None or len(target_snap) == 0:
             continue
 
         seed = config.random_seed + hash(target_date) % 10000
-        X_test, y_test, pairs_df = prepare_day_samples(
-            target_snap, node_feat_agg, historical_edges, active_nodes, config, seed
-        )
 
-        if len(y_test) == 0:
-            continue
-
+        day_metrics = {"date": target_date}
         for model_name, (model, params) in best_models.items():
-            y_proba = _predict_proba(model, model_name, X_test)
-            metrics = compute_classification_metrics(y_test, y_proba, K_VALUES)
-            metrics["date"] = target_date
-            metrics["model"] = model_name
-            metrics["best_params"] = params
-            exp_logger.log_metrics(metrics)
-            all_test_metrics[model_name].append(metrics)
+            ranks, n_skipped = evaluate_ranking_for_day(
+                model, model_name, target_snap, node_feat_agg,
+                hist_nbrs, active_nodes, config, seed,
+            )
 
-            pairs_df_with_pred = pairs_df.copy()
-            pairs_df_with_pred["pred_proba"] = y_proba
-            pairs_df_with_pred["model"] = model_name
-            exp_logger.save_predictions(pairs_df_with_pred, f"{target_date}_{model_name}")
+            if len(ranks) > 0:
+                day_ranking = compute_ranking_metrics(ranks)
+                day_ranking["model"] = model_name
+                day_ranking["date"] = target_date
+                day_ranking["n_skipped"] = n_skipped
+                day_ranking["best_params"] = params
+                exp_logger.log_metrics(day_ranking)
+                all_test_ranks[model_name].extend(ranks.tolist())
 
-        del features_by_date, window_snapshots, node_feat_agg
+                logger.info(
+                    "  %s %s: MRR=%.4f Hits@1=%.3f Hits@10=%.3f (%d queries, %d skipped)",
+                    target_date, model_name,
+                    day_ranking["mrr"], day_ranking["hits@1"], day_ranking["hits@10"],
+                    day_ranking["n_queries"], n_skipped,
+                )
+
+        del node_feat_agg, hist_nbrs
         gc.collect()
 
-        logger.info(
-            "  %s: %s",
-            target_date,
-            {m: f"ROC={met[-1].get('roc_auc', 0):.4f} PR={met[-1].get('pr_auc', 0):.4f}"
-             for m, met in all_test_metrics.items() if met},
-        )
-
     summary = {"config": config.to_dict(), "models": {}}
-    for model_name, metrics_list in all_test_metrics.items():
-        if not metrics_list:
+    for model_name, ranks_list in all_test_ranks.items():
+        if not ranks_list:
             continue
-        numeric_keys = [k for k in metrics_list[0] if isinstance(metrics_list[0][k], (int, float))]
-        model_summary = {}
-        for key in numeric_keys:
-            values = [m[key] for m in metrics_list if key in m and not np.isnan(m.get(key, float("nan")))]
-            if values:
-                model_summary[f"mean_{key}"] = float(np.mean(values))
-                model_summary[f"std_{key}"] = float(np.std(values))
-        model_summary["n_test_days"] = len(metrics_list)
+        all_ranks = np.array(ranks_list)
+        model_summary = compute_ranking_metrics(all_ranks)
         model_summary["best_params"] = best_models[model_name][1]
         summary["models"][model_name] = model_summary
     exp_logger.write_summary(summary)
@@ -695,11 +714,9 @@ def run_link_prediction_mode_a(config: ExperimentConfig, token: str) -> None:
 
 
 def run_link_prediction_mode_b(config: ExperimentConfig, token: str) -> None:
-    """Run link prediction in Mode B: live-update (retrain on each new day).
+    """Run link prediction Mode B: live-update with periodic retrain.
 
-    Args:
-        config: Experiment configuration.
-        token: Yandex.Disk OAuth token.
+    Evaluation uses per-source ranking protocol.
     """
     output_dir = os.path.join(
         config.output_dir or f"/tmp/baseline_results/{config.experiment_name}",
@@ -727,96 +744,66 @@ def run_link_prediction_mode_b(config: ExperimentConfig, token: str) -> None:
     warmup_dates = prediction_dates[:n_warmup]
     eval_dates = prediction_dates[n_warmup:]
 
-    logger.info(
-        "Mode B: %d warmup days, %d eval days", len(warmup_dates), len(eval_dates)
-    )
+    logger.info("Mode B: %d warmup days, %d eval days", len(warmup_dates), len(eval_dates))
 
     logger.info("Downloading data from Yandex.Disk...")
     download_period_data(all_dates, config.local_data_dir, token)
 
     logger.info("Collecting warmup samples...")
-    X_cumulative, y_cumulative = _collect_samples_for_days(
-        warmup_dates, all_dates, config, token
+    X_cumulative, y_cumulative = _collect_training_data(
+        warmup_dates, all_dates, config
     )
     if len(y_cumulative) == 0:
         logger.error("No warmup samples, aborting")
         exp_logger.close()
         return
 
-    feature_names = get_feature_names(config.feature_mode)
-    all_test_metrics = {m: [] for m in config.models}
     current_models = {}
-
     for model_name in config.models:
         params = _default_params(model_name)
         model = _create_model(model_name, params)
         model = _fit_model(model, model_name, X_cumulative, y_cumulative)
         current_models[model_name] = (model, params)
 
+    all_test_ranks = {m: [] for m in config.models}
     days_since_retrain = 0
 
     for eval_idx, target_date in enumerate(eval_dates):
-        target_idx = all_dates.index(target_date)
-        window_start = max(0, target_idx - config.window_size)
-        window_dates = all_dates[window_start:target_idx]
-
-        if not window_dates:
-            continue
-
-        features_by_date = {}
-        window_snapshots = {}
-        for d in window_dates:
-            nf = load_node_features(d, config.local_data_dir)
-            if nf is not None:
-                features_by_date[d] = nf
-            snap = load_daily_snapshot(d, config.local_data_dir)
-            if snap is not None:
-                window_snapshots[d] = snap
-
-        if not features_by_date:
-            continue
-
-        if config.aggregation == "mean":
-            node_feat_agg = aggregate_features_mean(features_by_date)
-        else:
-            node_feat_agg = aggregate_features_time_weighted(
-                features_by_date, window_dates, config.decay_lambda
-            )
-
-        active_nodes = _get_active_nodes(window_snapshots)
-        historical_edges = set()
-        for snap in window_snapshots.values():
-            historical_edges.update(_get_edges_set(snap))
-
-        target_snap = load_daily_snapshot(target_date, config.local_data_dir)
-        if target_snap is None or len(target_snap) == 0:
+        node_feat_agg, hist_nbrs, active_nodes, target_snap = _load_window_data(
+            target_date, all_dates, config
+        )
+        if node_feat_agg is None or target_snap is None or len(target_snap) == 0:
             continue
 
         seed = config.random_seed + hash(target_date) % 10000
-        X_day, y_day, pairs_df = prepare_day_samples(
-            target_snap, node_feat_agg, historical_edges, active_nodes, config, seed
-        )
-
-        if len(y_day) == 0:
-            continue
 
         for model_name, (model, params) in current_models.items():
-            y_proba = _predict_proba(model, model_name, X_day)
-            metrics = compute_classification_metrics(y_day, y_proba, K_VALUES)
-            metrics["date"] = target_date
-            metrics["model"] = model_name
-            metrics["cumulative_train_size"] = len(y_cumulative)
-            exp_logger.log_metrics(metrics)
-            all_test_metrics[model_name].append(metrics)
+            ranks, n_skipped = evaluate_ranking_for_day(
+                model, model_name, target_snap, node_feat_agg,
+                hist_nbrs, active_nodes, config, seed,
+            )
+            if len(ranks) > 0:
+                day_ranking = compute_ranking_metrics(ranks)
+                day_ranking["model"] = model_name
+                day_ranking["date"] = target_date
+                day_ranking["n_skipped"] = n_skipped
+                day_ranking["cumulative_train_size"] = len(y_cumulative)
+                exp_logger.log_metrics(day_ranking)
+                all_test_ranks[model_name].extend(ranks.tolist())
 
-        X_cumulative = np.vstack([X_cumulative, X_day])
-        y_cumulative = np.concatenate([y_cumulative, y_day])
+        X_day, y_day = prepare_training_samples(
+            target_snap, node_feat_agg, hist_nbrs, active_nodes, config, seed
+        )
 
-        if len(y_cumulative) > config.max_train_samples:
-            rng = np.random.RandomState(config.random_seed)
-            keep = rng.choice(len(y_cumulative), config.max_train_samples, replace=False)
-            X_cumulative = X_cumulative[keep]
-            y_cumulative = y_cumulative[keep]
+        if len(y_day) > 0:
+            X_cumulative = np.vstack([X_cumulative, X_day])
+            y_cumulative = np.concatenate([y_cumulative, y_day])
+
+            if len(y_cumulative) > config.max_train_samples:
+                rng = np.random.RandomState(config.random_seed)
+                keep = rng.choice(len(y_cumulative), config.max_train_samples, replace=False)
+                X_cumulative = X_cumulative[keep]
+                y_cumulative = y_cumulative[keep]
 
         days_since_retrain += 1
         should_retrain = (
@@ -832,14 +819,15 @@ def run_link_prediction_mode_b(config: ExperimentConfig, token: str) -> None:
                 current_models[model_name] = (model, params)
             days_since_retrain = 0
 
-        del features_by_date, window_snapshots, node_feat_agg
+        del node_feat_agg, hist_nbrs
         gc.collect()
 
         logger.info(
             "  %s (cumulative=%d, retrained=%s): %s",
             target_date, len(y_cumulative),
             "yes" if should_retrain else "no",
-            {m: f"ROC={met[-1].get('roc_auc', 0):.4f}" for m, met in all_test_metrics.items() if met},
+            {m: f"MRR={compute_ranking_metrics(np.array(r))['mrr']:.4f}"
+             for m, r in all_test_ranks.items() if r},
         )
 
     for model_name, (model, params) in current_models.items():
@@ -847,17 +835,12 @@ def run_link_prediction_mode_b(config: ExperimentConfig, token: str) -> None:
         exp_logger.save_model(model, f"final_{model_name}{ext}")
 
     summary = {"config": config.to_dict(), "mode": "B", "models": {}}
-    for model_name, metrics_list in all_test_metrics.items():
-        if not metrics_list:
+    for model_name, ranks_list in all_test_ranks.items():
+        if not ranks_list:
             continue
-        numeric_keys = [k for k in metrics_list[0] if isinstance(metrics_list[0][k], (int, float))]
-        model_summary = {}
-        for key in numeric_keys:
-            values = [m[key] for m in metrics_list if key in m and not np.isnan(m.get(key, float("nan")))]
-            if values:
-                model_summary[f"mean_{key}"] = float(np.mean(values))
-                model_summary[f"std_{key}"] = float(np.std(values))
-        model_summary["n_eval_days"] = len(metrics_list)
+        all_ranks = np.array(ranks_list)
+        model_summary = compute_ranking_metrics(all_ranks)
+        model_summary["n_eval_days"] = len(eval_dates)
         summary["models"][model_name] = model_summary
     exp_logger.write_summary(summary)
 
@@ -869,12 +852,7 @@ def run_link_prediction_mode_b(config: ExperimentConfig, token: str) -> None:
 
 
 def run_link_prediction(config: ExperimentConfig, token: str) -> None:
-    """Main entry point for link prediction experiment.
-
-    Args:
-        config: Experiment configuration.
-        token: Yandex.Disk OAuth token.
-    """
+    """Main entry point for link prediction experiment."""
     if config.mode == "A":
         run_link_prediction_mode_a(config, token)
     elif config.mode == "B":
