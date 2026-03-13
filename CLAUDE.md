@@ -146,7 +146,7 @@ local copies to conserve disk space. Supports resume (skips already processed da
 
 **Периоды:** 10 блоков по ~90 дней из разных эпох Bitcoin (2012–2020).
 Окна агрегации: W ∈ {3, 7, 14, 30}. Feature modes: base (50 фичей) и extended (100 фичей).
-HP search встроен в пайплайн (grid search по val-метрике MRR на подвыборке 500K сэмплов,
+HP search встроен в пайплайн (grid search по val-метрике PR-AUC на подвыборке 500K сэмплов,
 финальная модель обучается на полном датасете до 2M сэмплов).
 Mode B: retrain каждые 5 дней (retrain_interval=5), не каждый день.
 HP grids: LogReg 8, CatBoost 12, RF 12 комбинаций. Расчётное время: ~16-20 ч на 4 сессиях.

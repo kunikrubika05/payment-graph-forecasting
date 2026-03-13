@@ -13,11 +13,10 @@ import logging
 import os
 import time
 from itertools import product as iter_product
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy import sparse
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 
@@ -37,6 +36,8 @@ from src.baselines.evaluation import compute_ranking_metrics
 from src.baselines.experiment_logger import ExperimentLogger
 
 logger = logging.getLogger(__name__)
+
+EVAL_BATCH_SIZE = 5000
 
 
 def _get_edges_set(snapshot: pd.DataFrame) -> Set[Tuple[int, int]]:
@@ -69,6 +70,35 @@ def _get_source_neighbors(snapshots: Dict[str, pd.DataFrame]) -> Dict[int, Set[i
     return neighbors
 
 
+def _sample_random_negatives(
+    n_needed: int,
+    active_nodes: np.ndarray,
+    exclude: Set[int],
+    rng: np.random.RandomState,
+) -> List[int]:
+    """Sample random negatives using randint + rejection (O(n_needed), not O(N))."""
+    result = []
+    n_active = len(active_nodes)
+    if n_active == 0:
+        return result
+
+    max_attempts = n_needed * 10
+    drawn = 0
+    while len(result) < n_needed and drawn < max_attempts:
+        batch_size = min((n_needed - len(result)) * 3, n_active)
+        indices = rng.randint(0, n_active, size=batch_size)
+        for idx in indices:
+            node = active_nodes[idx]
+            if node not in exclude:
+                result.append(node)
+                exclude.add(node)
+                if len(result) >= n_needed:
+                    break
+        drawn += batch_size
+
+    return result
+
+
 def sample_negatives_per_source(
     source: int,
     true_dst: int,
@@ -95,8 +125,7 @@ def sample_negatives_per_source(
     n_hist = n_negatives // 2
     n_rand = n_negatives - n_hist
 
-    hist_candidates = historical_neighbors - target_edges_from_source
-    hist_candidates.discard(source)
+    hist_candidates = historical_neighbors - target_edges_from_source - {source, true_dst}
 
     hist_negatives = []
     if hist_candidates:
@@ -108,19 +137,8 @@ def sample_negatives_per_source(
             hist_negatives = hist_arr.tolist()
             n_rand += n_hist - len(hist_negatives)
 
-    exclude = target_edges_from_source | set(hist_negatives) | {source}
-    rand_negatives = []
-    if n_rand > 0 and len(active_nodes) > len(exclude):
-        attempts = 0
-        while len(rand_negatives) < n_rand and attempts < 5:
-            batch = rng.choice(active_nodes, size=min(n_rand * 3, len(active_nodes)), replace=False)
-            for node in batch:
-                if node not in exclude:
-                    rand_negatives.append(node)
-                    exclude.add(node)
-                    if len(rand_negatives) >= n_rand:
-                        break
-            attempts += 1
+    exclude = target_edges_from_source | set(hist_negatives) | {source, true_dst}
+    rand_negatives = _sample_random_negatives(n_rand, active_nodes, exclude, rng)
 
     all_negatives = hist_negatives + rand_negatives
     if not all_negatives:
@@ -138,12 +156,10 @@ def evaluate_ranking_for_day(
     config: ExperimentConfig,
     seed: int,
 ) -> Tuple[np.ndarray, int]:
-    """Evaluate model on one day using per-source ranking protocol.
+    """Evaluate model on one day using per-source ranking protocol (batched).
 
-    For each positive edge (s, d, t):
-      1. Fix source s, build candidate set {d} ∪ {neg_1, ..., neg_q}
-      2. Score all candidates, determine rank of d
-      3. Collect rank
+    Processes edges in batches of EVAL_BATCH_SIZE to avoid O(N) per-edge overhead.
+    All edges are evaluated (no subsampling), per TGB standard.
 
     Args:
         model: Trained model.
@@ -162,14 +178,12 @@ def evaluate_ranking_for_day(
     target_edges = _get_edges_set(target_snapshot)
     known_nodes = set(node_features_agg.index)
 
+    queries = []
+    n_skipped = 0
+
     src_to_dsts: Dict[int, Set[int]] = {}
     for s, d in target_edges:
-        if s not in src_to_dsts:
-            src_to_dsts[s] = set()
-        src_to_dsts[s].add(d)
-
-    ranks = []
-    n_skipped = 0
+        src_to_dsts.setdefault(s, set()).add(d)
 
     for source, destinations in src_to_dsts.items():
         if source not in known_nodes:
@@ -177,43 +191,67 @@ def evaluate_ranking_for_day(
             continue
 
         hist_nbrs = historical_neighbors.get(source, set())
+        hist_candidates = list(hist_nbrs - destinations - {source})
 
         for true_dst in destinations:
             if true_dst not in known_nodes:
                 n_skipped += 1
                 continue
 
-            neg_dsts = sample_negatives_per_source(
-                source=source,
-                true_dst=true_dst,
-                historical_neighbors=hist_nbrs,
-                target_edges_from_source=destinations,
-                active_nodes=active_nodes,
-                n_negatives=config.n_negatives,
-                rng=rng,
-            )
+            n_hist = min(config.n_negatives // 2, len(hist_candidates))
+            n_rand = config.n_negatives - n_hist
 
-            if len(neg_dsts) == 0:
-                n_skipped += 1
-                continue
+            negatives = []
+            if n_hist > 0:
+                idx = rng.choice(len(hist_candidates), n_hist, replace=False)
+                negatives = [hist_candidates[i] for i in idx]
 
-            valid_neg = [d for d in neg_dsts if d in known_nodes]
+            exclude = destinations | set(negatives) | {source, true_dst}
+            rand_neg = _sample_random_negatives(n_rand, active_nodes, exclude, rng)
+            negatives.extend(rand_neg)
+
+            valid_neg = [d for d in negatives if d in known_nodes]
             if not valid_neg:
                 n_skipped += 1
                 continue
 
-            candidate_dsts = np.array([true_dst] + valid_neg, dtype=np.int64)
-            sources = np.full(len(candidate_dsts), source, dtype=np.int64)
+            queries.append((source, true_dst, valid_neg))
 
-            X, _ = build_pair_features(
-                node_features_agg, sources, candidate_dsts, mode=config.feature_mode
-            )
+    if not queries:
+        return np.array([], dtype=np.int64), n_skipped
 
-            scores = _predict_proba(model, model_name, X)
+    ranks = []
+    n_candidates = 1 + config.n_negatives
 
-            true_score = scores[0]
-            rank = 1 + int(np.sum(scores[1:] > true_score))
+    for batch_start in range(0, len(queries), EVAL_BATCH_SIZE):
+        batch = queries[batch_start:batch_start + EVAL_BATCH_SIZE]
+
+        all_src = []
+        all_dst = []
+        query_sizes = []
+
+        for source, true_dst, neg_dsts in batch:
+            candidates = [true_dst] + neg_dsts
+            all_src.extend([source] * len(candidates))
+            all_dst.extend(candidates)
+            query_sizes.append(len(candidates))
+
+        src_arr = np.array(all_src, dtype=np.int64)
+        dst_arr = np.array(all_dst, dtype=np.int64)
+
+        X, _ = build_pair_features(
+            node_features_agg, src_arr, dst_arr, mode=config.feature_mode
+        )
+
+        scores = _predict_proba(model, model_name, X)
+
+        offset = 0
+        for q_size in query_sizes:
+            q_scores = scores[offset:offset + q_size]
+            true_score = q_scores[0]
+            rank = 1 + int(np.sum(q_scores[1:] > true_score))
             ranks.append(rank)
+            offset += q_size
 
     return np.array(ranks, dtype=np.int64), n_skipped
 
@@ -228,10 +266,8 @@ def prepare_training_samples(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Prepare training samples for one target day (binary classification).
 
-    For training, we still use binary classification (positive + negative pairs)
-    because ranking loss is unnecessary for LogReg/CatBoost/RF baselines.
-    The key improvement is using per-source historical+random negatives
-    instead of global random negatives.
+    Vectorized per-source batch sampling: for each source, negatives are
+    sampled once for all its edges (not per-edge), using 50/50 hist+random mix.
 
     Args:
         target_snapshot: Edge list for the target day.
@@ -248,11 +284,10 @@ def prepare_training_samples(
     target_edges = _get_edges_set(target_snapshot)
     known_nodes = set(node_features_agg.index)
 
-    src_to_dsts: Dict[int, Set[int]] = {}
+    src_to_dsts: Dict[int, List[int]] = {}
     for s, d in target_edges:
-        if s not in src_to_dsts:
-            src_to_dsts[s] = set()
-        src_to_dsts[s].add(d)
+        if s in known_nodes and d in known_nodes:
+            src_to_dsts.setdefault(s, []).append(d)
 
     all_src = []
     all_dst = []
@@ -261,34 +296,34 @@ def prepare_training_samples(
     neg_per_positive = config.negative_ratio
 
     for source, destinations in src_to_dsts.items():
-        if source not in known_nodes:
-            continue
+        dst_set = set(destinations)
+        n_total_neg = len(destinations) * neg_per_positive
 
         hist_nbrs = historical_neighbors.get(source, set())
+        hist_candidates = list((hist_nbrs - dst_set - {source}) & known_nodes)
+
+        n_hist = min(n_total_neg // 2, len(hist_candidates))
+        n_rand = n_total_neg - n_hist
+
+        negatives = []
+        if n_hist > 0:
+            replace = len(hist_candidates) < n_hist
+            idx = rng.choice(len(hist_candidates), n_hist, replace=replace)
+            negatives = [hist_candidates[i] for i in idx]
+
+        exclude = dst_set | set(negatives) | {source}
+        rand_neg = _sample_random_negatives(n_rand, active_nodes, exclude, rng)
+        negatives.extend(rand_neg)
 
         for true_dst in destinations:
-            if true_dst not in known_nodes:
-                continue
-
             all_src.append(source)
             all_dst.append(true_dst)
             all_labels.append(1)
 
-            neg_dsts = sample_negatives_per_source(
-                source=source,
-                true_dst=true_dst,
-                historical_neighbors=hist_nbrs,
-                target_edges_from_source=destinations,
-                active_nodes=active_nodes,
-                n_negatives=neg_per_positive,
-                rng=rng,
-            )
-
-            for nd in neg_dsts:
-                if nd in known_nodes:
-                    all_src.append(source)
-                    all_dst.append(nd)
-                    all_labels.append(0)
+        for neg_d in negatives[:n_total_neg]:
+            all_src.append(source)
+            all_dst.append(neg_d)
+            all_labels.append(0)
 
     if not all_src:
         n_feat = len(get_feature_names(config.feature_mode))
@@ -309,11 +344,12 @@ def _load_window_data(
     target_date: str,
     all_dates: List[str],
     config: ExperimentConfig,
-) -> Tuple[pd.DataFrame, Dict[int, Set[int]], np.ndarray, pd.DataFrame]:
+) -> Tuple[Optional[pd.DataFrame], Dict[int, Set[int]], np.ndarray, Optional[pd.DataFrame]]:
     """Load and aggregate window data for a target date.
 
     Returns:
         Tuple of (node_feat_agg, historical_neighbors, active_nodes, target_snap).
+        node_feat_agg and target_snap may be None if data is unavailable.
     """
     target_idx = all_dates.index(target_date)
     window_start = max(0, target_idx - config.window_size)
@@ -357,7 +393,8 @@ def _collect_training_data(
     y_list = []
     total_samples = 0
 
-    for target_date in dates:
+    for i, target_date in enumerate(dates):
+        t0 = time.time()
         node_feat_agg, hist_nbrs, active_nodes, target_snap = _load_window_data(
             target_date, all_dates, config
         )
@@ -375,6 +412,12 @@ def _collect_training_data(
         X_list.append(X)
         y_list.append(y)
         total_samples += len(y)
+        elapsed = time.time() - t0
+
+        logger.info(
+            "  [%d/%d] %s: %d samples (%.1f sec, cumulative=%d)",
+            i + 1, len(dates), target_date, len(y), elapsed, total_samples,
+        )
 
         del node_feat_agg, hist_nbrs
         gc.collect()
@@ -661,7 +704,8 @@ def run_link_prediction_mode_a(config: ExperimentConfig, token: str) -> None:
     logger.info("=== Ranking evaluation on test days ===")
     all_test_ranks = {m: [] for m in best_models}
 
-    for target_date in test_dates:
+    for day_idx, target_date in enumerate(test_dates):
+        t0 = time.time()
         node_feat_agg, hist_nbrs, active_nodes, target_snap = _load_window_data(
             target_date, all_dates, config
         )
@@ -670,7 +714,6 @@ def run_link_prediction_mode_a(config: ExperimentConfig, token: str) -> None:
 
         seed = config.random_seed + hash(target_date) % 10000
 
-        day_metrics = {"date": target_date}
         for model_name, (model, params) in best_models.items():
             ranks, n_skipped = evaluate_ranking_for_day(
                 model, model_name, target_snap, node_feat_agg,
@@ -686,11 +729,13 @@ def run_link_prediction_mode_a(config: ExperimentConfig, token: str) -> None:
                 exp_logger.log_metrics(day_ranking)
                 all_test_ranks[model_name].extend(ranks.tolist())
 
+                elapsed = time.time() - t0
                 logger.info(
-                    "  %s %s: MRR=%.4f Hits@1=%.3f Hits@10=%.3f (%d queries, %d skipped)",
-                    target_date, model_name,
+                    "  [%d/%d] %s %s: MRR=%.4f Hits@1=%.3f Hits@10=%.3f "
+                    "(%d queries, %d skipped, %.1fs)",
+                    day_idx + 1, len(test_dates), target_date, model_name,
                     day_ranking["mrr"], day_ranking["hits@1"], day_ranking["hits@10"],
-                    day_ranking["n_queries"], n_skipped,
+                    day_ranking["n_queries"], n_skipped, elapsed,
                 )
 
         del node_feat_agg, hist_nbrs
@@ -769,6 +814,7 @@ def run_link_prediction_mode_b(config: ExperimentConfig, token: str) -> None:
     days_since_retrain = 0
 
     for eval_idx, target_date in enumerate(eval_dates):
+        t0 = time.time()
         node_feat_agg, hist_nbrs, active_nodes, target_snap = _load_window_data(
             target_date, all_dates, config
         )
@@ -819,13 +865,15 @@ def run_link_prediction_mode_b(config: ExperimentConfig, token: str) -> None:
                 current_models[model_name] = (model, params)
             days_since_retrain = 0
 
+        elapsed = time.time() - t0
         del node_feat_agg, hist_nbrs
         gc.collect()
 
         logger.info(
-            "  %s (cumulative=%d, retrained=%s): %s",
+            "  [%d/%d] %s (cumulative=%d, retrained=%s, %.1fs): %s",
+            eval_idx + 1, len(eval_dates),
             target_date, len(y_cumulative),
-            "yes" if should_retrain else "no",
+            "yes" if should_retrain else "no", elapsed,
             {m: f"MRR={compute_ranking_metrics(np.array(r))['mrr']:.4f}"
              for m, r in all_test_ranks.items() if r},
         )

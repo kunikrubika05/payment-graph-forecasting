@@ -20,17 +20,14 @@ def compute_ranking_metrics(
     Returns:
         Dictionary with MRR, Hits@K for each K, and statistics.
     """
-    if len(ranks) == 0:
-        return {
-            "n_queries": 0,
-            "mrr": float("nan"),
-            "hits@1": float("nan"),
-            "hits@3": float("nan"),
-            "hits@10": float("nan"),
-        }
-
     if k_values is None:
         k_values = [1, 3, 10]
+
+    if len(ranks) == 0:
+        result = {"n_queries": 0, "mrr": float("nan")}
+        for k in k_values:
+            result[f"hits@{k}"] = float("nan")
+        return result
 
     ranks = np.asarray(ranks, dtype=np.float64)
 
