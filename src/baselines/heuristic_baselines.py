@@ -151,6 +151,8 @@ def _evaluate_heuristic_ranking(
 
     all_ranks = []
 
+    n_active = len(active_nodes)
+
     for source, true_dsts in edges_by_source.items():
         target_set = set(true_dsts)
         hist = historical_neighbors.get(source, set())
@@ -164,14 +166,23 @@ def _evaluate_heuristic_ranking(
             if n_hist > 0:
                 negatives.extend(rng.choice(hist_candidates, size=n_hist, replace=False).tolist())
 
-            rand_pool = list(active_set - target_set - set(negatives) - {source})
-            if len(rand_pool) >= n_rand:
-                negatives.extend(rng.choice(rand_pool, size=n_rand, replace=False).tolist())
-            else:
-                negatives.extend(rand_pool)
+            exclude = target_set | set(negatives) | {source, d_true}
+            if n_rand > 0 and n_active > 0:
+                drawn = 0
+                max_attempts = n_rand * 10
+                while len(negatives) < n_hist + n_rand and drawn < max_attempts:
+                    batch_size = min((n_hist + n_rand - len(negatives)) * 3, n_active)
+                    indices = rng.randint(0, n_active, size=batch_size)
+                    for idx in indices:
+                        node = active_nodes[idx]
+                        if node in valid_nodes and node not in exclude:
+                            negatives.append(node)
+                            exclude.add(node)
+                            if len(negatives) >= n_hist + n_rand:
+                                break
+                    drawn += batch_size
 
-            candidates = [d_true] + negatives
-            candidates_in_adj = [c for c in candidates if c in valid_nodes]
+            candidates_in_adj = [d_true] + [c for c in negatives if c in valid_nodes]
 
             if len(candidates_in_adj) < 2:
                 continue
@@ -181,8 +192,8 @@ def _evaluate_heuristic_ranking(
 
             scores = heuristic_fn(adj, src_local, dst_local)
 
-            true_score = scores[candidates_in_adj.index(d_true)]
-            rank = int(np.sum(scores > true_score)) + 1
+            true_score = scores[0]
+            rank = int(np.sum(scores[1:] > true_score)) + 1
             all_ranks.append(rank)
 
     return np.array(all_ranks)
