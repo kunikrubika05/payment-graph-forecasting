@@ -10,11 +10,11 @@ import numpy as np
 import pandas as pd
 from scipy import sparse
 
-from src.baselines.config import ExperimentConfig, K_VALUES
+from src.baselines.config import ExperimentConfig
 from src.baselines.data_loader import (
     get_available_dates, download_period_data, load_daily_snapshot, cleanup_period_data,
 )
-from src.baselines.evaluation import compute_classification_metrics
+from src.baselines.evaluation import compute_ranking_metrics
 from src.baselines.experiment_logger import ExperimentLogger
 
 logger = logging.getLogger(__name__)
@@ -110,49 +110,82 @@ def compute_preferential_attachment(adj: sparse.csr_matrix, src_idx: np.ndarray,
     return degrees[src_idx] * degrees[dst_idx]
 
 
-def _sample_pairs_for_heuristic(
-    target_edges: Set[Tuple[int, int]],
-    nodes: np.ndarray,
+def _evaluate_heuristic_ranking(
+    adj: sparse.csr_matrix,
     node_to_idx: Dict[int, int],
-    neg_ratio: int,
+    nodes: np.ndarray,
+    target_edges: Set[Tuple[int, int]],
+    historical_neighbors: Dict[int, Set[int]],
+    active_nodes: np.ndarray,
+    heuristic_fn,
+    n_negatives: int,
     seed: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Sample positive and negative pairs for heuristic evaluation.
+) -> np.ndarray:
+    """Evaluate a heuristic using per-source ranking protocol (TGB-style).
+
+    For each positive edge (s, d_true), builds a candidate set of
+    {d_true} ∪ {neg_1, ..., neg_q} and ranks d_true by heuristic score.
+
+    Args:
+        adj: Binary undirected adjacency matrix (local indices).
+        node_to_idx: Mapping from global node ID to local index.
+        nodes: Array of global node IDs.
+        target_edges: Set of (src, dst) edges in the target day.
+        historical_neighbors: Per-source historical neighbor sets.
+        active_nodes: Array of all active node IDs.
+        heuristic_fn: Function(adj, src_local, dst_local) -> scores.
+        n_negatives: Number of negative candidates per query.
+        seed: Random seed.
 
     Returns:
-        Tuple of (src_local, dst_local, y_true, pairs_global).
+        Array of 1-based ranks for each query.
     """
     rng = np.random.RandomState(seed)
-
     valid_nodes = set(node_to_idx.keys())
-    pos_pairs = [(s, d) for s, d in target_edges if s in valid_nodes and d in valid_nodes]
+    active_set = set(active_nodes)
 
-    if not pos_pairs:
-        return np.array([]), np.array([]), np.array([]), np.empty((0, 2))
+    edges_by_source: Dict[int, List[int]] = {}
+    for s, d in target_edges:
+        if s in valid_nodes and d in valid_nodes:
+            edges_by_source.setdefault(s, []).append(d)
 
-    n_neg = len(pos_pairs) * neg_ratio
-    neg_pairs = []
-    n_nodes = len(nodes)
-    attempts = 0
-    while len(neg_pairs) < n_neg and attempts < 10:
-        src_idx = rng.randint(0, n_nodes, size=n_neg * 3)
-        dst_idx = rng.randint(0, n_nodes, size=n_neg * 3)
-        mask = src_idx != dst_idx
-        for s, d in zip(nodes[src_idx[mask]], nodes[dst_idx[mask]]):
-            if (s, d) not in target_edges:
-                neg_pairs.append((s, d))
-                if len(neg_pairs) >= n_neg:
-                    break
-        attempts += 1
+    all_ranks = []
 
-    all_pairs = pos_pairs + neg_pairs[:n_neg]
-    y = np.array([1] * len(pos_pairs) + [0] * len(neg_pairs[:n_neg]))
+    for source, true_dsts in edges_by_source.items():
+        target_set = set(true_dsts)
+        hist = historical_neighbors.get(source, set())
+        hist_candidates = list(hist - target_set - {source})
 
-    src_local = np.array([node_to_idx[p[0]] for p in all_pairs])
-    dst_local = np.array([node_to_idx[p[1]] for p in all_pairs])
-    pairs_global = np.array(all_pairs, dtype=np.int64)
+        for d_true in true_dsts:
+            n_hist = min(n_negatives // 2, len(hist_candidates))
+            n_rand = n_negatives - n_hist
 
-    return src_local, dst_local, y, pairs_global
+            negatives = []
+            if n_hist > 0:
+                negatives.extend(rng.choice(hist_candidates, size=n_hist, replace=False).tolist())
+
+            rand_pool = list(active_set - target_set - set(negatives) - {source})
+            if len(rand_pool) >= n_rand:
+                negatives.extend(rng.choice(rand_pool, size=n_rand, replace=False).tolist())
+            else:
+                negatives.extend(rand_pool)
+
+            candidates = [d_true] + negatives
+            candidates_in_adj = [c for c in candidates if c in valid_nodes]
+
+            if len(candidates_in_adj) < 2:
+                continue
+
+            src_local = np.array([node_to_idx[source]] * len(candidates_in_adj))
+            dst_local = np.array([node_to_idx[c] for c in candidates_in_adj])
+
+            scores = heuristic_fn(adj, src_local, dst_local)
+
+            true_score = scores[candidates_in_adj.index(d_true)]
+            rank = int(np.sum(scores > true_score)) + 1
+            all_ranks.append(rank)
+
+    return np.array(all_ranks)
 
 
 def run_heuristic_baselines(config: ExperimentConfig, token: str) -> None:
@@ -219,27 +252,32 @@ def run_heuristic_baselines(config: ExperimentConfig, token: str) -> None:
             target_snap["src_idx"].values, target_snap["dst_idx"].values
         ))
 
+        historical_neighbors: Dict[int, Set[int]] = {}
+        for snap in window_snapshots.values():
+            if snap is not None and len(snap) > 0:
+                for s, d in zip(snap["src_idx"].values, snap["dst_idx"].values):
+                    historical_neighbors.setdefault(s, set()).add(d)
+
+        active_nodes = nodes
+
         seed = config.random_seed + hash(target_date) % 10000
-        src_local, dst_local, y_true, pairs_global = _sample_pairs_for_heuristic(
-            target_edges, nodes, node_to_idx, config.negative_ratio, seed
-        )
 
-        if len(y_true) == 0:
-            continue
-
-        heuristic_scores = {
-            "common_neighbors": compute_common_neighbors(adj, src_local, dst_local),
-            "jaccard": compute_jaccard(adj, src_local, dst_local),
-            "adamic_adar": compute_adamic_adar(adj, src_local, dst_local),
-            "pref_attachment": compute_preferential_attachment(adj, src_local, dst_local),
+        heuristic_fns = {
+            "common_neighbors": compute_common_neighbors,
+            "jaccard": compute_jaccard,
+            "adamic_adar": compute_adamic_adar,
+            "pref_attachment": compute_preferential_attachment,
         }
 
-        for hname, scores in heuristic_scores.items():
-            if np.max(scores) > 0:
-                scores_norm = scores / np.max(scores)
-            else:
-                scores_norm = scores
-            metrics = compute_classification_metrics(y_true, scores_norm, K_VALUES)
+        for hname, hfn in heuristic_fns.items():
+            ranks = _evaluate_heuristic_ranking(
+                adj, node_to_idx, nodes, target_edges,
+                historical_neighbors, active_nodes, hfn,
+                config.n_negatives, seed,
+            )
+            if len(ranks) == 0:
+                continue
+            metrics = compute_ranking_metrics(ranks)
             metrics["date"] = target_date
             metrics["heuristic"] = hname
             exp_logger.log_metrics(metrics)
@@ -251,7 +289,7 @@ def run_heuristic_baselines(config: ExperimentConfig, token: str) -> None:
         logger.info(
             "  %s: %s",
             target_date,
-            {h: f"ROC={m[-1].get('roc_auc', 0):.4f}" for h, m in all_metrics.items() if m},
+            {h: f"MRR={m[-1].get('mrr', 0):.4f}" for h, m in all_metrics.items() if m},
         )
 
     summary = {"config": config.to_dict(), "heuristics": {}}

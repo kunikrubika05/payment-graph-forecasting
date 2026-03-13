@@ -11,7 +11,7 @@ import pytest
 
 from src.baselines.config import ExperimentConfig, NODE_FEATURE_COLUMNS
 from src.baselines.evaluation import (
-    compute_classification_metrics,
+    compute_ranking_metrics,
     compute_ts_metrics,
 )
 from src.baselines.experiment_logger import ExperimentLogger
@@ -129,29 +129,38 @@ class TestFeatureEngineering:
 
 class TestEvaluation:
 
-    def test_classification_metrics_basic(self):
-        y_true = np.array([1, 1, 0, 0, 1, 0])
-        y_proba = np.array([0.9, 0.8, 0.3, 0.1, 0.7, 0.2])
-        metrics = compute_classification_metrics(y_true, y_proba, k_values=[2, 3])
-        assert 0 < metrics["roc_auc"] <= 1.0
-        assert 0 < metrics["pr_auc"] <= 1.0
-        assert "precision@2" in metrics
-        assert "recall@2" in metrics
-        assert metrics["n_positive"] == 3
-        assert metrics["n_negative"] == 3
+    def test_ranking_metrics_basic(self):
+        ranks = np.array([1, 3, 2, 5, 1])
+        metrics = compute_ranking_metrics(ranks)
+        assert metrics["n_queries"] == 5
+        assert 0 < metrics["mrr"] <= 1.0
+        assert 0 < metrics["hits@1"] <= 1.0
+        assert metrics["hits@1"] == 2 / 5
+        assert metrics["hits@3"] == 4 / 5
+        assert metrics["hits@10"] == 1.0
 
-    def test_classification_metrics_perfect(self):
-        y_true = np.array([1, 1, 0, 0])
-        y_proba = np.array([0.9, 0.8, 0.1, 0.05])
-        metrics = compute_classification_metrics(y_true, y_proba, k_values=[2])
-        assert metrics["roc_auc"] == 1.0
-        assert metrics["precision@n_pos"] == 1.0
+    def test_ranking_metrics_perfect(self):
+        ranks = np.array([1, 1, 1])
+        metrics = compute_ranking_metrics(ranks)
+        assert metrics["mrr"] == 1.0
+        assert metrics["hits@1"] == 1.0
+        assert metrics["hits@10"] == 1.0
 
-    def test_classification_metrics_all_same_class(self):
-        y_true = np.array([1, 1, 1])
-        y_proba = np.array([0.9, 0.8, 0.7])
-        metrics = compute_classification_metrics(y_true, y_proba)
-        assert np.isnan(metrics["roc_auc"])
+    def test_ranking_metrics_empty(self):
+        ranks = np.array([])
+        metrics = compute_ranking_metrics(ranks)
+        assert metrics["n_queries"] == 0
+        assert np.isnan(metrics["mrr"])
+
+    def test_ranking_metrics_custom_k(self):
+        ranks = np.array([1, 5, 10, 50])
+        metrics = compute_ranking_metrics(ranks, k_values=[1, 5, 20])
+        assert "hits@1" in metrics
+        assert "hits@5" in metrics
+        assert "hits@20" in metrics
+        assert metrics["hits@1"] == 0.25
+        assert metrics["hits@5"] == 0.5
+        assert metrics["hits@20"] == 0.75
 
     def test_ts_metrics(self):
         y_true = np.array([100.0, 200.0, 300.0, 400.0])
@@ -195,8 +204,8 @@ class TestExperimentLogger:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "test_exp")
             exp_logger = ExperimentLogger(output)
-            exp_logger.log_metrics({"roc_auc": 0.85, "date": "2020-01-01"})
-            exp_logger.log_metrics({"roc_auc": 0.87, "date": "2020-01-02"})
+            exp_logger.log_metrics({"mrr": 0.55, "date": "2020-01-01"})
+            exp_logger.log_metrics({"mrr": 0.60, "date": "2020-01-02"})
             exp_logger.close()
 
             metrics_path = os.path.join(output, "metrics.jsonl")
@@ -204,14 +213,14 @@ class TestExperimentLogger:
                 lines = f.readlines()
             assert len(lines) == 2
             first = json.loads(lines[0])
-            assert first["roc_auc"] == 0.85
+            assert first["mrr"] == 0.55
 
     def test_summary_and_completed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "test_exp")
             exp_logger = ExperimentLogger(output)
             assert not exp_logger.is_completed()
-            exp_logger.write_summary({"mean_roc_auc": 0.86})
+            exp_logger.write_summary({"mean_mrr": 0.56})
             assert exp_logger.is_completed()
             exp_logger.close()
 
@@ -277,42 +286,66 @@ class TestConfig:
             loaded = ExperimentConfig.load(path)
             assert loaded.period_name == "early_2012q1"
 
+    def test_config_n_negatives(self):
+        config = ExperimentConfig()
+        assert config.n_negatives == 100
+        assert config.negative_ratio == 5
+
 
 class TestLinkPredictionHelpers:
 
-    def test_sample_negatives_random(self):
-        from src.baselines.link_prediction import sample_negatives_random
+    def test_sample_negatives_per_source(self):
+        from src.baselines.link_prediction import sample_negatives_per_source
 
-        positive = {(0, 1), (1, 2), (2, 3)}
-        nodes = np.array([0, 1, 2, 3, 4])
-        neg = sample_negatives_random(positive, nodes, n_samples=5, seed=42)
-        assert len(neg) == 5
-        for s, d in neg:
-            assert (s, d) not in positive
+        rng = np.random.RandomState(42)
+        active = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+        hist_nbrs = {1, 2, 3, 4}
+        target_dsts = {1, 5}
 
-    def test_sample_negatives_historical(self):
-        from src.baselines.link_prediction import sample_negatives_historical
+        neg = sample_negatives_per_source(
+            source=0,
+            true_dst=1,
+            historical_neighbors=hist_nbrs,
+            target_edges_from_source=target_dsts,
+            active_nodes=active,
+            n_negatives=6,
+            rng=rng,
+        )
+        assert len(neg) > 0
+        assert 1 not in neg
+        assert 0 not in neg
 
-        positive = {(0, 1), (1, 2)}
-        historical = {(0, 1), (1, 2), (2, 3), (3, 4), (4, 0)}
-        neg = sample_negatives_historical(positive, historical, n_samples=3, seed=42)
-        assert len(neg) == 3
-        for s, d in neg:
-            assert (s, d) not in positive
-            assert (s, d) in historical
+    def test_sample_negatives_per_source_hist_random_mix(self):
+        from src.baselines.link_prediction import sample_negatives_per_source
 
-    def test_prepare_day_samples(self):
-        from src.baselines.link_prediction import prepare_day_samples
+        rng = np.random.RandomState(42)
+        active = np.arange(100)
+        hist_nbrs = {10, 20, 30, 40, 50}
+        target_dsts = {10}
+
+        neg = sample_negatives_per_source(
+            source=0,
+            true_dst=10,
+            historical_neighbors=hist_nbrs,
+            target_edges_from_source=target_dsts,
+            active_nodes=active,
+            n_negatives=10,
+            rng=rng,
+        )
+        assert len(neg) == 10
+        hist_in_neg = set(neg) & (hist_nbrs - target_dsts)
+        assert len(hist_in_neg) > 0
+
+    def test_prepare_training_samples(self):
+        from src.baselines.link_prediction import prepare_training_samples
 
         snapshot = _make_snapshot([(0, 1), (1, 2), (2, 0)])
         node_feats = _make_node_features([0, 1, 2, 3, 4])
-        historical = {(0, 1), (3, 4)}
+        hist_nbrs = {0: {1, 3}, 1: {2, 4}, 2: {0}}
         active = np.array([0, 1, 2, 3, 4])
-        config = ExperimentConfig(
-            negative_ratio=2, negative_strategy="random", feature_mode="extended"
-        )
-        X, y, pairs = prepare_day_samples(
-            snapshot, node_feats, historical, active, config, seed=42
+        config = ExperimentConfig(negative_ratio=2, feature_mode="extended")
+        X, y = prepare_training_samples(
+            snapshot, node_feats, hist_nbrs, active, config, seed=42
         )
         assert len(y) > 0
         assert y.sum() > 0
@@ -329,12 +362,35 @@ class TestLinkPredictionHelpers:
         y_train = (X_train[:, 0] > 0.5).astype(float)
         X_val = rng.rand(50, 10)
         y_val = (X_val[:, 0] > 0.5).astype(float)
-        best_model, best_params, results = hp_search(
+        best_params, results = hp_search(
             "logreg", X_train, y_train, X_val, y_val
         )
-        assert best_model is not None
         assert "C" in best_params
         assert len(results) > 0
+
+    def test_evaluate_ranking(self):
+        from src.baselines.link_prediction import evaluate_ranking_for_day
+
+        from sklearn.linear_model import LogisticRegression
+        rng = np.random.RandomState(42)
+        X_train = rng.rand(100, len(NODE_FEATURE_COLUMNS) * 4)
+        y_train = (rng.rand(100) > 0.5).astype(float)
+        model = LogisticRegression(max_iter=100, random_state=42)
+        model.fit(X_train, y_train)
+
+        snapshot = _make_snapshot([(0, 1), (0, 2), (1, 2)])
+        node_feats = _make_node_features([0, 1, 2, 3, 4, 5])
+        hist_nbrs = {0: {1, 3, 4}, 1: {0, 2, 5}, 2: {0, 1}}
+        active = np.array([0, 1, 2, 3, 4, 5])
+        config = ExperimentConfig(n_negatives=4, feature_mode="extended")
+
+        ranks, n_skipped = evaluate_ranking_for_day(
+            model, "logreg", snapshot, node_feats,
+            hist_nbrs, active, config, seed=42
+        )
+        assert len(ranks) > 0
+        assert all(r >= 1 for r in ranks)
+        assert all(r <= 5 for r in ranks)
 
 
 class TestHeuristicHelpers:

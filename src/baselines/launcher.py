@@ -14,14 +14,18 @@ from src.baselines.config import PERIODS, WINDOW_SIZES, ExperimentConfig
 logger = logging.getLogger(__name__)
 
 QUEUE_DIR = "/tmp/baseline_queues"
+LOG_DIR = "/tmp/baseline_logs"
 PROJECT_DIR = os.path.expanduser("~/payment-graph-forecasting")
 
 
 def generate_link_prediction_configs() -> List[dict]:
-    """Generate link prediction experiment configs.
+    """Generate link prediction experiment configs (TGB-style protocol).
+
+    Negative sampling is always per-source 50/50 historical+random mix.
+    No separate negative_strategy dimension.
 
     Returns:
-        List of config dictionaries covering the full experiment matrix.
+        List of config dictionaries.
     """
     configs = []
 
@@ -41,25 +45,7 @@ def generate_link_prediction_configs() -> List[dict]:
             period_name=period,
             window_size=7,
             aggregation="mean",
-            negative_strategy="random",
             mode="A",
-            models=["logreg", "catboost", "rf"],
-            feature_mode="extended",
-            negative_ratio=5,
-        ).to_dict())
-
-    for period in base_periods:
-        configs.append(ExperimentConfig(
-            experiment_name="exp_001_link_pred_baselines",
-            task="link_prediction",
-            period_name=period,
-            window_size=7,
-            aggregation="mean",
-            negative_strategy="historical",
-            mode="A",
-            models=["logreg", "catboost", "rf"],
-            feature_mode="extended",
-            negative_ratio=5,
         ).to_dict())
 
     for period in base_periods:
@@ -70,11 +56,7 @@ def generate_link_prediction_configs() -> List[dict]:
             window_size=7,
             aggregation="time_weighted",
             decay_lambda=0.3,
-            negative_strategy="random",
             mode="A",
-            models=["logreg", "catboost", "rf"],
-            feature_mode="extended",
-            negative_ratio=5,
         ).to_dict())
 
     for period in ["mid_2015q3", "mature_2020q2"]:
@@ -85,11 +67,7 @@ def generate_link_prediction_configs() -> List[dict]:
                 period_name=period,
                 window_size=w,
                 aggregation="mean",
-                negative_strategy="random",
                 mode="A",
-                models=["logreg", "catboost", "rf"],
-                feature_mode="extended",
-                negative_ratio=5,
             ).to_dict())
 
     for period in ["mid_2015q3", "peak_2018q2", "mature_2020q2"]:
@@ -99,25 +77,7 @@ def generate_link_prediction_configs() -> List[dict]:
             period_name=period,
             window_size=7,
             aggregation="mean",
-            negative_strategy="random",
             mode="B",
-            models=["logreg", "catboost", "rf"],
-            feature_mode="extended",
-            negative_ratio=5,
-        ).to_dict())
-
-    for period in ["mid_2015q3", "mature_2020q2"]:
-        configs.append(ExperimentConfig(
-            experiment_name="exp_001_link_pred_baselines",
-            task="link_prediction",
-            period_name=period,
-            window_size=7,
-            aggregation="mean",
-            negative_strategy="both",
-            mode="A",
-            models=["logreg", "catboost", "rf"],
-            feature_mode="base",
-            negative_ratio=5,
         ).to_dict())
 
     for period in extra_periods:
@@ -127,11 +87,7 @@ def generate_link_prediction_configs() -> List[dict]:
             period_name=period,
             window_size=7,
             aggregation="mean",
-            negative_strategy="random",
             mode="A",
-            models=["logreg", "catboost", "rf"],
-            feature_mode="extended",
-            negative_ratio=5,
         ).to_dict())
 
     return configs
@@ -173,21 +129,13 @@ def generate_heuristic_configs() -> List[dict]:
                 task="heuristic",
                 period_name=period,
                 window_size=w,
-                negative_ratio=5,
             ).to_dict())
 
     return configs
 
 
 def estimate_difficulty(config: dict) -> float:
-    """Estimate relative runtime for load balancing.
-
-    Args:
-        config: Config dictionary.
-
-    Returns:
-        Estimated difficulty score (higher = longer runtime).
-    """
+    """Estimate relative runtime for load balancing."""
     period = config.get("period_name", "")
 
     period_weights = {
@@ -214,15 +162,7 @@ def estimate_difficulty(config: dict) -> float:
 def distribute_configs(
     configs: List[dict], n_sessions: int
 ) -> List[List[dict]]:
-    """Distribute configs across sessions, balancing estimated load.
-
-    Args:
-        configs: List of config dictionaries.
-        n_sessions: Number of tmux sessions.
-
-    Returns:
-        List of config lists, one per session.
-    """
+    """Distribute configs across sessions, balancing estimated load."""
     scored = [(estimate_difficulty(c), c) for c in configs]
     scored.sort(key=lambda x: -x[0])
 
@@ -240,13 +180,8 @@ def distribute_configs(
     return queues
 
 
-def launch(n_sessions: int = 8, dry_run: bool = False) -> None:
-    """Generate configs, create queues, launch tmux sessions.
-
-    Args:
-        n_sessions: Number of parallel tmux sessions.
-        dry_run: If True, generate configs and show plan without launching.
-    """
+def launch(n_sessions: int = 4, dry_run: bool = False) -> None:
+    """Generate configs, create queues, launch tmux sessions."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -266,6 +201,8 @@ def launch(n_sessions: int = 8, dry_run: bool = False) -> None:
     queues = distribute_configs(all_configs, n_sessions)
 
     Path(QUEUE_DIR).mkdir(parents=True, exist_ok=True)
+    Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
+
     for i, queue in enumerate(queues):
         queue_path = os.path.join(QUEUE_DIR, f"queue_{i}.json")
         with open(queue_path, "w") as f:
@@ -290,7 +227,7 @@ def launch(n_sessions: int = 8, dry_run: bool = False) -> None:
 
         session_name = f"baseline_{i}"
         queue_path = os.path.join(QUEUE_DIR, f"queue_{i}.json")
-        log_path = f"/tmp/baseline_logs/session_{i}.log"
+        log_path = os.path.join(LOG_DIR, f"baseline_{i}.log")
 
         cmd = (
             f"cd {PROJECT_DIR} && "
@@ -316,13 +253,13 @@ def launch(n_sessions: int = 8, dry_run: bool = False) -> None:
     logger.info("All %d sessions launched. Monitor with:", n_sessions)
     logger.info("  tmux ls")
     logger.info("  tmux attach -t baseline_0")
-    logger.info("  tail -f /tmp/baseline_logs/session_0.log")
+    logger.info("  tail -f %s/baseline_0.log", LOG_DIR)
     logger.info("=" * 60)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Launch baseline experiments")
-    parser.add_argument("--sessions", type=int, default=8, help="Number of tmux sessions")
+    parser.add_argument("--sessions", type=int, default=4, help="Number of tmux sessions")
     parser.add_argument("--dry-run", action="store_true", help="Show plan without launching")
     args = parser.parse_args()
     launch(args.sessions, args.dry_run)
