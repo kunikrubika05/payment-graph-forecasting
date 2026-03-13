@@ -139,7 +139,7 @@ def build_pair_features(
     feature_cols = [c for c in NODE_FEATURE_COLUMNS if c in node_features.columns]
     n_feat = len(feature_cols)
 
-    feat_matrix = node_features[feature_cols].values
+    feat_matrix = node_features[feature_cols].values.astype(np.float32)
     idx_to_row = pd.Series(
         np.arange(len(node_features)), index=node_features.index
     )
@@ -177,7 +177,7 @@ def build_pair_features(
     if nan_mask.any():
         X = np.nan_to_num(X, nan=0.0)
 
-    return X, feature_names
+    return X.astype(np.float32), feature_names
 
 
 def get_feature_names(mode: str = "extended") -> List[str]:

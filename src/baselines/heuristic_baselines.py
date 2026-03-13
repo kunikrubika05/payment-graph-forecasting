@@ -142,7 +142,6 @@ def _evaluate_heuristic_ranking(
     """
     rng = np.random.RandomState(seed)
     valid_nodes = set(node_to_idx.keys())
-    active_set = set(active_nodes)
 
     edges_by_source: Dict[int, List[int]] = {}
     for s, d in target_edges:

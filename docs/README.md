@@ -60,6 +60,37 @@ Generates 6 plots from CSV sample data:
 5. Entity overlap between days
 6. Network subgraph (top-30 nodes)
 
+### `src/baselines/` — Baseline experiments pipeline
+
+Pipeline for training and evaluating link prediction, graph-level forecasting,
+and heuristic baselines. Uses TGB-style per-source ranking evaluation.
+
+| Module | Description |
+|--------|-------------|
+| `config.py` | `ExperimentConfig` dataclass, period definitions, HP grids |
+| `data_loader.py` | Download/load node features and daily snapshots from Yandex.Disk |
+| `feature_engineering.py` | Mean/time-weighted feature aggregation, pair feature construction (float32) |
+| `evaluation.py` | Ranking metrics (MRR, Hits@K), time series metrics (MAE, RMSE, MAPE, sMAPE) |
+| `experiment_logger.py` | Logging: config, metrics, models, predictions, upload to Yandex.Disk |
+| `link_prediction.py` | Link prediction pipeline: Mode A (single train) + Mode B (live-update retrain) |
+| `graph_forecasting.py` | ARIMA, SARIMAX, Holt-Winters, Prophet on graph-level time series |
+| `heuristic_baselines.py` | Common Neighbors, Jaccard, Adamic-Adar, Preferential Attachment |
+| `runner.py` | Queue-based experiment runner with resume and error handling |
+| `launcher.py` | Generates 35 experiment configs, distributes across tmux sessions |
+
+**Evaluation protocol** (see also `evaluation_protocols_temporal_lp_ru.md`):
+- Per-source ranking: for each positive edge (s, d), fix s, build candidate set
+  {d_true} ∪ {neg_1, ..., neg_q}, rank candidates by model score.
+- n_negatives=100, 50/50 historical+random negative mix.
+- Metrics: filtered MRR (primary), Hits@1, Hits@3, Hits@10.
+- HP search uses PR-AUC on validation set (binary classification metric).
+
+**Key design decisions:**
+- Pair features use float32 to reduce memory (50% vs float64).
+- Evaluation batched (EVAL_BATCH_SIZE=1000) to avoid OOM on heavy periods.
+- Per-source batch negative sampling in training (not per-edge) for efficiency.
+- Mode B limited to lightweight periods (mid_2015q3) due to 24h compute budget.
+
 ## Data formats
 
 See the main [README.md](../README.md) for detailed column descriptions of:
