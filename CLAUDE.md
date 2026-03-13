@@ -148,8 +148,10 @@ local copies to conserve disk space. Supports resume (skips already processed da
 Окна агрегации: W ∈ {3, 7, 14, 30}. Feature modes: base (50 фичей) и extended (100 фичей).
 HP search встроен в пайплайн (grid search по val-метрике PR-AUC на подвыборке 500K сэмплов,
 финальная модель обучается на полном датасете до 2M сэмплов).
-Mode B: retrain каждые 5 дней (retrain_interval=5), не каждый день.
-HP grids: LogReg 8, CatBoost 12, RF 12 комбинаций. Расчётное время: ~16-20 ч на 4 сессиях.
+Mode B: retrain каждые 5 дней (retrain_interval=5), только для mid_2015q3 (тяжёлые периоды
+исключены из-за бюджета 24ч).
+HP grids: LogReg 8, CatBoost 12, RF 12 комбинаций.
+Pair features используют float32 для экономии памяти (50% vs float64).
 
 **Модули:**
 - `src/yadisk_utils.py` — download/upload с Яндекс.Диска (retry, рекурсивные папки)
@@ -162,7 +164,7 @@ HP grids: LogReg 8, CatBoost 12, RF 12 комбинаций. Расчётное 
 - `src/baselines/graph_forecasting.py` — time series forecasting pipeline
 - `src/baselines/heuristic_baselines.py` — heuristic scores pipeline
 - `src/baselines/runner.py` — обработка очереди конфигов с resume и error handling
-- `src/baselines/launcher.py` — генерация ~45 экспериментов, распределение по tmux-сессиям
+- `src/baselines/launcher.py` — генерация 35 экспериментов (22 LP + 3 graph forecast + 10 heuristic), распределение по tmux-сессиям
 
 **Запуск на дев-машине:**
 ```bash

@@ -70,7 +70,7 @@ def generate_link_prediction_configs() -> List[dict]:
                 mode="A",
             ).to_dict())
 
-    for period in ["mid_2015q3", "peak_2018q2", "mature_2020q2"]:
+    for period in ["mid_2015q3"]:
         configs.append(ExperimentConfig(
             experiment_name="exp_001_link_pred_baselines",
             task="link_prediction",

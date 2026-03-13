@@ -37,7 +37,7 @@ from src.baselines.experiment_logger import ExperimentLogger
 
 logger = logging.getLogger(__name__)
 
-EVAL_BATCH_SIZE = 5000
+EVAL_BATCH_SIZE = 1000
 
 
 def _get_edges_set(snapshot: pd.DataFrame) -> Set[Tuple[int, int]]:
@@ -191,7 +191,7 @@ def evaluate_ranking_for_day(
             continue
 
         hist_nbrs = historical_neighbors.get(source, set())
-        hist_candidates = list(hist_nbrs - destinations - {source})
+        hist_candidates = list((hist_nbrs - destinations - {source}) & known_nodes)
 
         for true_dst in destinations:
             if true_dst not in known_nodes:
@@ -221,7 +221,6 @@ def evaluate_ranking_for_day(
         return np.array([], dtype=np.int64), n_skipped
 
     ranks = []
-    n_candidates = 1 + config.n_negatives
 
     for batch_start in range(0, len(queries), EVAL_BATCH_SIZE):
         batch = queries[batch_start:batch_start + EVAL_BATCH_SIZE]
@@ -307,8 +306,7 @@ def prepare_training_samples(
 
         negatives = []
         if n_hist > 0:
-            replace = len(hist_candidates) < n_hist
-            idx = rng.choice(len(hist_candidates), n_hist, replace=replace)
+            idx = rng.choice(len(hist_candidates), n_hist, replace=False)
             negatives = [hist_candidates[i] for i in idx]
 
         exclude = dst_set | set(negatives) | {source}
@@ -715,6 +713,7 @@ def run_link_prediction_mode_a(config: ExperimentConfig, token: str) -> None:
         seed = config.random_seed + hash(target_date) % 10000
 
         for model_name, (model, params) in best_models.items():
+            t_model = time.time()
             ranks, n_skipped = evaluate_ranking_for_day(
                 model, model_name, target_snap, node_feat_agg,
                 hist_nbrs, active_nodes, config, seed,
@@ -729,13 +728,13 @@ def run_link_prediction_mode_a(config: ExperimentConfig, token: str) -> None:
                 exp_logger.log_metrics(day_ranking)
                 all_test_ranks[model_name].extend(ranks.tolist())
 
-                elapsed = time.time() - t0
+                model_elapsed = time.time() - t_model
                 logger.info(
                     "  [%d/%d] %s %s: MRR=%.4f Hits@1=%.3f Hits@10=%.3f "
                     "(%d queries, %d skipped, %.1fs)",
                     day_idx + 1, len(test_dates), target_date, model_name,
                     day_ranking["mrr"], day_ranking["hits@1"], day_ranking["hits@10"],
-                    day_ranking["n_queries"], n_skipped, elapsed,
+                    day_ranking["n_queries"], n_skipped, model_elapsed,
                 )
 
         del node_feat_agg, hist_nbrs
