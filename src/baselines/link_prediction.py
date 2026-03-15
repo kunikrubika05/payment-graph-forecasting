@@ -530,7 +530,7 @@ def _create_model(model_name: str, params: dict):
             task_type="CPU",
             verbose=0,
             random_seed=42,
-            thread_count=1,
+            thread_count=int(os.environ.get("CATBOOST_THREADS", "1")),
         )
     elif model_name == "rf":
         return RandomForestClassifier(
@@ -539,7 +539,7 @@ def _create_model(model_name: str, params: dict):
             min_samples_leaf=params["min_samples_leaf"],
             class_weight="balanced_subsample",
             random_state=42,
-            n_jobs=1,
+            n_jobs=int(os.environ.get("RF_N_JOBS", "1")),
         )
     raise ValueError(f"Unknown model: {model_name}")
 
