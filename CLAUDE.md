@@ -62,14 +62,10 @@ orbitaal_processed/
     2021-01-25.parquet        # 4401 files total
 ```
 
-**Raw data on dev machine** (`data/raw/`):
-```
-data/raw/
-  orbitaal-nodetable.tar.gz        # 24.9 GB (downloaded, NOT extracted yet)
-  orbitaal-stream_graph.tar.gz     # 23.9 GB (downloaded, NOT extracted yet)
-```
-Note: `orbitaal-snapshot-day.tar.gz` and its extracted parquets have been deleted
-from the dev machine after processed data was confirmed on Yandex.Disk.
+**Raw data:** Первая дев-машинка (8 cores / 64 GB / 200 GB SSD) была уничтожена 2026-03-15.
+Raw-файлы (`orbitaal-nodetable.tar.gz`, `orbitaal-stream_graph.tar.gz`) утеряны.
+Все обработанные данные и 9 завершённых экспериментов сохранены на Яндекс.Диске.
+При необходимости raw-данные можно скачать заново с Zenodo.
 
 ### Data quality notes
 
@@ -172,11 +168,16 @@ cd ~/payment-graph-forecasting && git pull
 source venv/bin/activate && pip install -r requirements.txt
 PYTHONPATH=. python -m pytest tests/test_baselines.py -v
 export YADISK_TOKEN="..."
+export RF_N_JOBS=4          # RF параллелизм (cores / sessions)
+export CATBOOST_THREADS=4   # CatBoost параллелизм
 PYTHONPATH=. python src/baselines/launcher.py --sessions 4
 ```
 
-**Мониторинг:** `tmux ls`, `tail -f /tmp/baseline_logs/baseline_N.log`
-**Resume:** при перезапуске runner пропускает эксперименты с готовым `summary.json`.
+**Мониторинг:** `tmux ls`, `tail -f /tmp/baseline_logs/baseline_N.log`,
+`bash scripts/full_check.sh` (полный статус + проверка Яндекс.Диска).
+**Resume:** при перезапуске runner пропускает эксперименты с готовым `summary.json`
+(проверяет **локальный** `/tmp/baseline_results/`). При миграции на новую машинку
+нужно предварительно скачать `summary.json` с Яндекс.Диска (скрипт `scripts/sync_completed.py`).
 **Ошибки:** записываются в `error.txt` в папке эксперимента, runner переходит к следующему.
 
 **Структура результатов на Яндекс.Диске:**
@@ -192,6 +193,36 @@ orbitaal_processed/experiments/
   exp_002_graph_level_baselines/
   exp_003_heuristic_baselines/
 ```
+
+**Статус baseline экспериментов (2026-03-15):**
+
+Всего 35 экспериментов (22 LP + 3 graph forecast + 10 heuristic).
+
+Завершено 9/35, все на Яндекс.Диске:
+- `period_mature_2020q2_w3_mean_modeA` (LP)
+- `period_mature_2020q2_w7_mean_modeA` (LP)
+- `period_mature_2020q2_w14_mean_modeA` (LP)
+- `period_mature_2020q2_w30_mean_modeA` (LP)
+- `period_mature_2020q2_w7_time_weighted_modeA` (LP)
+- `period_late_2020q4_w7_mean_modeA` (LP)
+- `period_peak_2018q2_w7_mean_modeA` (LP)
+- `period_peak_2018q2_w7_time_weighted_modeA` (LP)
+- `period_post_peak_2019q1_w7_mean_modeA` (LP)
+
+Оставшиеся 26: 13 LP + 10 heuristic + 3 graph forecasting.
+Самые тяжёлые периоды (2018-2020) уже посчитаны. Оставшиеся LP — 2012-2017 (легче).
+
+**Предварительные результаты (MRR, TGB-style ranking):**
+- LogReg: 0.25-0.35 (слабая линейная модель)
+- CatBoost: 0.48-0.62 (сопоставимо с TGB PA=0.481, TGN=0.586)
+- RF: 0.49-0.55 (близко к CatBoost)
+- Heuristic CN: ~0.72, AA: ~0.71, Jaccard: ~0.65, PA: ~0.53
+
+**Оптимизация heuristic (2026-03-15):**
+Heuristic baselines были оптимизированы: Python-циклы в compute_CN/Jaccard/AA заменены
+на vectorized sparse matrix operations (`adj[src].multiply(adj[dst]).sum(axis=1)`).
+Все 4 эвристики теперь считаются за один проход (вместо 4× генерации кандидатов).
+Ожидаемое ускорение: ~100-500× (5 ч/день → ~1-3 мин/день).
 
 ### Tests
 
@@ -313,7 +344,12 @@ Branch naming: `feature/<name>`, `fix/<name>`, `experiment/<name>`
 
 ### Dev machine
 
-- **OS:** Ubuntu 22.04, **CPU:** 8 cores, **RAM:** 64 GB, **SSD:** 200 GB
+Первая машинка (8 cores / 64 GB / 200 GB SSD) уничтожена 2026-03-15.
+Рекомендуемый конфиг новой машинки: **16 cores / 64 GB RAM / 100 GB SSD**.
+- 16 cores: RF_N_JOBS=4 × 4 сессии = 16 cores (полная утилизация)
+- 64 GB RAM: запас на случай тяжёлых графов (sparse matrix ops на ~500K узлов)
+- 100 GB SSD: достаточно для кэша данных (~20 GB результатов)
+
 - **Access:** SSH with key-based auth (`ssh -i <path_to_key> -l cursach <DEV_MACHINE_IP>`)
 - **Python venv** is set up on the machine with all dependencies
 - **tmux** is used for long-running processes (pipeline steps take hours)
@@ -408,10 +444,8 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
 ### Current decisions
 
 - **Stream graph is deferred.** We focus on snapshot-day (daily aggregated graphs) for now.
-  Stream graph (`orbitaal-stream_graph.tar.gz`) is kept on the dev machine for future use
-  (link prediction with temporal resolution, sub-daily analysis). Do not delete it.
-- **Raw snapshot-day tar.gz and extracted parquet** can be deleted from the dev machine
-  after confirming processed data is intact on Yandex.Disk.
+  Stream graph нужно будет скачать заново с Zenodo при необходимости (старая машинка уничтожена).
+- **Processed data** полностью на Яндекс.Диске. Новая машинка качает их через API по требованию.
 
 ---
 
