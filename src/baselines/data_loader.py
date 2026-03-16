@@ -15,6 +15,7 @@ from src.yadisk_utils import download_file
 logger = logging.getLogger(__name__)
 
 GRAPH_FEATURES_LOCAL = "data/processed/graph_features.csv"
+YADISK_GRAPH_FEATURES = "orbitaal_processed/graph_features.csv"
 YADISK_NODE_FEATURES = "orbitaal_processed/node_features"
 YADISK_DAILY_SNAPSHOTS = "orbitaal_processed/daily_snapshots"
 
@@ -130,8 +131,39 @@ def load_daily_snapshot(date: str, local_dir: str) -> Optional[pd.DataFrame]:
     return pd.read_parquet(path)
 
 
+def ensure_graph_features(token: str = None) -> str:
+    """Ensure graph_features.csv exists locally, downloading from Yandex.Disk if needed.
+
+    Args:
+        token: Yandex.Disk OAuth token. If None, reads from YADISK_TOKEN env var.
+
+    Returns:
+        Path to local graph_features.csv.
+    """
+    if os.path.exists(GRAPH_FEATURES_LOCAL):
+        return GRAPH_FEATURES_LOCAL
+
+    if token is None:
+        token = os.environ.get("YADISK_TOKEN", "")
+
+    if not token:
+        raise FileNotFoundError(
+            f"{GRAPH_FEATURES_LOCAL} not found and YADISK_TOKEN not set for download"
+        )
+
+    logger.info("Downloading graph_features.csv from Yandex.Disk...")
+    Path(GRAPH_FEATURES_LOCAL).parent.mkdir(parents=True, exist_ok=True)
+    success = download_file(YADISK_GRAPH_FEATURES, GRAPH_FEATURES_LOCAL, token)
+    if not success or not os.path.exists(GRAPH_FEATURES_LOCAL):
+        raise FileNotFoundError(
+            f"Failed to download {YADISK_GRAPH_FEATURES} from Yandex.Disk"
+        )
+    logger.info("Downloaded graph_features.csv (%d bytes)", os.path.getsize(GRAPH_FEATURES_LOCAL))
+    return GRAPH_FEATURES_LOCAL
+
+
 def load_graph_features(path: str = GRAPH_FEATURES_LOCAL) -> pd.DataFrame:
-    """Load graph-level features CSV.
+    """Load graph-level features CSV, auto-downloading from Yandex.Disk if missing.
 
     Args:
         path: Path to graph_features.csv.
@@ -139,6 +171,8 @@ def load_graph_features(path: str = GRAPH_FEATURES_LOCAL) -> pd.DataFrame:
     Returns:
         DataFrame with date column parsed as datetime.
     """
+    if not os.path.exists(path) and path == GRAPH_FEATURES_LOCAL:
+        ensure_graph_features()
     return pd.read_csv(path, parse_dates=["date"])
 
 
