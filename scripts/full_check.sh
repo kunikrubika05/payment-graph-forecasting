@@ -7,15 +7,20 @@ tmux ls 2>/dev/null || echo "  НЕТ ЖИВЫХ СЕССИЙ"
 
 echo ""
 echo "=== 2. ЗАВЕРШЁННЫЕ ЭКСПЕРИМЕНТЫ ==="
-completed=$(find /tmp/baseline_results -name summary.json 2>/dev/null | sort)
-count=$(echo "$completed" | grep -c "summary" 2>/dev/null || echo 0)
-echo "  Завершено: $count / 35"
-echo "$completed" | while read f; do
-  [ -z "$f" ] && continue
+completed=""
+count=0
+for f in $(find /tmp/baseline_results -name summary.json 2>/dev/null | sort); do
+  if grep -q "split_in_progress" "$f" 2>/dev/null; then
+    continue
+  fi
   dir=$(dirname "$f")
   name=$(echo "$dir" | sed 's|/tmp/baseline_results/||')
-  echo "  [DONE] $name"
+  completed="$completed
+  [DONE] $name"
+  count=$((count + 1))
 done
+echo "  Завершено: $count / 35"
+echo "$completed"
 
 echo ""
 echo "=== 3. В РАБОТЕ (config.json есть, summary.json нет) ==="
@@ -39,6 +44,25 @@ for i in 0 1 2 3; do
     echo ""
   fi
 done
+
+echo ""
+echo "=== 4b. SPLIT HEURISTIC ==="
+split_found=0
+for part in a b c; do
+  log="/tmp/baseline_logs/heur_${part}.log"
+  if [ -f "$log" ]; then
+    split_found=1
+    last=$(grep -E '\[.*\/.*\]' "$log" | tail -1)
+    if grep -q "Saved.*records" "$log" 2>/dev/null; then
+      echo "  [DONE] heur_$part: $(grep 'Saved' "$log" | tail -1)"
+    elif [ -n "$last" ]; then
+      echo "  [WORK] heur_$part: $last"
+    else
+      echo "  [INIT] heur_$part: запускается..."
+    fi
+  fi
+done
+[ "$split_found" -eq 0 ] && echo "  Не запущен"
 
 echo ""
 echo "=== 5. ОШИБКИ ==="
