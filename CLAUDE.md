@@ -30,7 +30,9 @@ External economic factors (price, news, market activity) matter more than intern
 3. **Graph-level Forecasting** — predict num_nodes, num_edges, total_volume as time series (SARIMAX, Prophet, TFT, hybrid models)
 4. **Node Activity Prediction** — will entity be active tomorrow? (classification)
 
-**Not yet decided** which task to prioritize. This is the next discussion point.
+**Decision (2026-03-19):** Focus on **Link Prediction**. Graph-level forecasting deprioritized
+(weak connection to graph structure, no standard benchmark, low ceiling for improvement).
+Next step: GNN models (TGN, GraphSAGE) for temporal link prediction.
 
 ### Key findings from literature review
 
@@ -194,35 +196,25 @@ orbitaal_processed/experiments/
   exp_003_heuristic_baselines/
 ```
 
-**Статус baseline экспериментов (2026-03-15):**
+**Статус baseline экспериментов (2026-03-19):**
 
 Всего 35 экспериментов (22 LP + 3 graph forecast + 10 heuristic).
+Завершено **33/35**, все на Яндекс.Диске. 2 heuristic эксперимента (mid_2015q3 w7)
+не досчитаны из-за отключения дев-машины — некритично для выводов.
 
-Завершено 9/35, все на Яндекс.Диске:
-- `period_mature_2020q2_w3_mean_modeA` (LP)
-- `period_mature_2020q2_w7_mean_modeA` (LP)
-- `period_mature_2020q2_w14_mean_modeA` (LP)
-- `period_mature_2020q2_w30_mean_modeA` (LP)
-- `period_mature_2020q2_w7_time_weighted_modeA` (LP)
-- `period_late_2020q4_w7_mean_modeA` (LP)
-- `period_peak_2018q2_w7_mean_modeA` (LP)
-- `period_peak_2018q2_w7_time_weighted_modeA` (LP)
-- `period_post_peak_2019q1_w7_mean_modeA` (LP)
+**Результаты (MRR, TGB-style ranking):**
+- LogReg: 0.17-0.37 (слабая линейная модель)
+- CatBoost: 0.34-0.62
+- RF: 0.33-0.63
+- Heuristic CN: 0.46-0.73 (лучший метод на всех периодах)
+- Heuristic AA: 0.43-0.72, Jaccard: 0.36-0.66, PA: 0.29-0.55
 
-Оставшиеся 26: 13 LP + 10 heuristic + 3 graph forecasting.
-Самые тяжёлые периоды (2018-2020) уже посчитаны. Оставшиеся LP — 2012-2017 (легче).
-
-**Предварительные результаты (MRR, TGB-style ranking):**
-- LogReg: 0.25-0.35 (слабая линейная модель)
-- CatBoost: 0.48-0.62 (сопоставимо с TGB PA=0.481, TGN=0.586)
-- RF: 0.49-0.55 (близко к CatBoost)
-- Heuristic CN: ~0.72, AA: ~0.71, Jaccard: ~0.65, PA: ~0.53
-
-**Оптимизация heuristic (2026-03-15):**
-Heuristic baselines были оптимизированы: Python-циклы в compute_CN/Jaccard/AA заменены
-на vectorized sparse matrix operations (`adj[src].multiply(adj[dst]).sum(axis=1)`).
-Все 4 эвристики теперь считаются за один проход (вместо 4× генерации кандидатов).
-Ожидаемое ускорение: ~100-500× (5 ч/день → ~1-3 мин/день).
+**Ключевые выводы:**
+- CN побеждает ML-модели с отрывом 0.02-0.13 MRR → графовая структура критически важна
+- Качество растёт от ранних (2012) к зрелым (2020) периодам
+- Размер окна, агрегация, Mode A/B влияют слабо
+- Graph-level forecasting: persistence MAPE 11-17%, ARIMA/SARIMAX улучшают на 1-3 п.п.
+- Подробные таблицы: `docs/baseline_results_summary.md`, `docs/baseline_results_for_llm.md`
 
 ### Tests
 
@@ -443,14 +435,19 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
 
 ### Current decisions
 
+- **Focus on Link Prediction.** Graph-level forecasting deprioritized (2026-03-19).
 - **Stream graph is deferred.** We focus on snapshot-day (daily aggregated graphs) for now.
   Stream graph нужно будет скачать заново с Zenodo при необходимости (старая машинка уничтожена).
 - **Processed data** полностью на Яндекс.Диске. Новая машинка качает их через API по требованию.
 
 ---
 
-## Open questions
+## Next steps (2026-03-20)
 
-1. ~~Which baselines to implement first?~~ **Done** — LP (LogReg/CatBoost/RF), graph-level (ARIMA/SARIMAX/Prophet), heuristic (CN/Jaccard/AA/PA).
-2. How to handle the pre-2010 period with sparse/empty graphs? (Likely just filter to 2010+ or 2010-07-17+)
-3. Next steps after baselines: GNN models (GraphSAGE, GAT), Node2Vec embeddings, temporal GNNs?
+1. ~~Baselines~~ **Done** (33/35). Results: `docs/baseline_results_for_llm.md`.
+2. **DL models for temporal link prediction** — research best architectures (TGN, TGAT, GraphSAGE, etc.),
+   implement and compare with baseline heuristics. Goal: learn structural patterns (like CN)
+   in a trainable way, target MRR 0.6-0.7+ (matching/exceeding CN=0.73 on mature periods).
+3. Graph-level forecasting **deprioritized** — low ceiling, weak graph-structure connection,
+   no standard benchmark. Baselines computed for completeness, not pursuing further.
+4. Pre-2010 period: filter to 2010+ or 2010-07-17+ (sparse/empty graphs before that).
