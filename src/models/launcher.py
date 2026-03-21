@@ -18,8 +18,7 @@ import numpy as np
 import torch
 
 from src.models.data_utils import (
-    prepare_period_data,
-    chronological_split,
+    prepare_sliding_window,
     TemporalCSR,
 )
 from src.models.train import train_graphmixer
@@ -102,26 +101,17 @@ def run_experiment(args: argparse.Namespace) -> None:
         logger.info("GPU: %s", torch.cuda.get_device_name(0))
         logger.info("GPU memory: %.1f GB", torch.cuda.get_device_properties(0).total_memory / 1e9)
 
-    logger.info("Step 1: Preparing data for period '%s'...", args.period)
+    logger.info("Step 1: Preparing data for period '%s' (window=%d)...", args.period, args.window)
     data_start = time.time()
-    data, dates = prepare_period_data(
-        args.period, local_dir=args.data_dir, undirected=True,
+    data, dates, train_mask, val_mask, test_mask = prepare_sliding_window(
+        args.period, window=args.window, local_dir=args.data_dir, undirected=True,
     )
     data_time = time.time() - data_start
     logger.info("Data: %s (%.1f sec)", data, data_time)
 
-    window_dates = dates[-args.window:]
-    logger.info("Using last %d days as context window: %s to %s",
-                args.window, window_dates[0], window_dates[-1])
-
-    logger.info("Step 2: Chronological split...")
-    train_mask, val_mask, test_mask = chronological_split(
-        data, train_ratio=args.train_ratio, val_ratio=args.val_ratio,
-    )
-
     _save_data_summary(output_dir, data, dates, train_mask, val_mask, test_mask)
 
-    logger.info("Step 3: Training GraphMixer...")
+    logger.info("Step 2: Training GraphMixer...")
     train_start = time.time()
     model, history = train_graphmixer(
         data=data,
@@ -144,7 +134,7 @@ def run_experiment(args: argparse.Namespace) -> None:
 
     _save_training_curves(output_dir, history)
 
-    logger.info("Step 4: TGB-style evaluation on test set...")
+    logger.info("Step 3: TGB-style evaluation on test set...")
     eval_start = time.time()
     all_before_test = train_mask | val_mask
     test_csr = TemporalCSR(
@@ -204,7 +194,7 @@ def run_experiment(args: argparse.Namespace) -> None:
     logger.info("  Total time:   %.1f min", total_time / 60)
     logger.info("=" * 60)
 
-    logger.info("Step 5: Uploading results to Yandex.Disk...")
+    logger.info("Step 4: Uploading results to Yandex.Disk...")
     token = os.environ.get("YADISK_TOKEN", "")
     if token:
         remote_dir = f"{YADISK_EXPERIMENTS_BASE}/{exp_name}"
@@ -239,8 +229,6 @@ def main():
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--train-ratio", type=float, default=0.6)
-    parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--max-val-edges", type=int, default=5000)
     parser.add_argument("--eval-batch-size", type=int, default=32)
 

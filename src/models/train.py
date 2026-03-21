@@ -144,8 +144,11 @@ def train_epoch(
     shuffled = rng.permutation(edge_indices)
     total_loss = 0.0
     num_batches = 0
+    n_total_batches = (len(shuffled) + batch_size - 1) // batch_size
 
-    for start in range(0, len(shuffled), batch_size):
+    pbar = tqdm(range(0, len(shuffled), batch_size), total=n_total_batches,
+                desc="Training", leave=False, unit="batch")
+    for start in pbar:
         end = min(start + batch_size, len(shuffled))
         batch_idx = shuffled[start:end]
         actual_batch = len(batch_idx)
@@ -203,7 +206,9 @@ def train_epoch(
 
         total_loss += loss.item()
         num_batches += 1
+        pbar.set_postfix(loss=f"{total_loss / num_batches:.4f}")
 
+    pbar.close()
     return {"loss": total_loss / max(num_batches, 1)}
 
 
