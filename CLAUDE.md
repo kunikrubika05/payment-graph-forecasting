@@ -216,14 +216,51 @@ orbitaal_processed/experiments/
 - Graph-level forecasting: persistence MAPE 11-17%, ARIMA/SARIMAX улучшают на 1-3 п.п.
 - Подробные таблицы: `docs/baseline_results_summary.md`, `docs/baseline_results_for_llm.md`
 
+### DL models for temporal link prediction
+
+`src/models/` — пайплайн глубокого обучения для temporal link prediction.
+Первая модель: **GraphMixer** (Cong et al., ICLR 2023).
+
+**Архитектура GraphMixer:**
+- LinkEncoder: MLP-Mixer over K=20 последних рёбер (temporal edge sequences)
+- NodeEncoder: node features + mean-pool 1-hop neighbor features
+- LinkClassifier: additive MLP (fc_src(h_src) + fc_dst(h_dst) → score)
+- 138K параметров, 540 KB. Не использует attention или GNN.
+
+**C++ расширение** (`src/models/csrc/temporal_sampling.cpp`):
+- TemporalCSR: CSR с binary search по timestamp
+- sample_neighbors_batch: пакетный сэмплинг K соседей
+- featurize_neighbors: заполнение feature-массивов
+- Компиляция: `python src/models/build_ext.py` (pybind11 через torch.utils.cpp_extension)
+- Fallback на Python/NumPy если не скомпилировано
+
+**Протокол оценки:** идентичен бейзлайнам (TGB-style: 50 hist + 50 random negatives,
+per-source ranking, MRR/Hits@K). Использует ту же `compute_ranking_metrics` из
+`src/baselines/evaluation.py`.
+
+**Запуск:**
+```bash
+python src/models/build_ext.py  # компиляция C++ (один раз)
+YADISK_TOKEN="..." PYTHONPATH=. python src/models/launcher.py \
+    --period mature_2020q2 --output /tmp/graphmixer_results \
+    2>&1 | tee /tmp/graphmixer.log
+```
+
+**Документация:** `docs/graphmixer_pipeline.md` — полное описание архитектуры, пайплайна,
+параметров CLI и структуры результатов.
+
+**Статус (2026-03-21):** Реализовано, 42 теста проходят. Ожидает запуска на дев-машине.
+
 ### Tests
 
-82 tests total — all passing:
+124 tests total — all passing:
 - `tests/test_pipeline.py` — 11 tests for the data pipeline
 - `tests/test_compute_features.py` — 36 tests for feature computation (correctness,
   disk cleanup, resume, edge cases)
 - `tests/test_baselines.py` — 35 tests for baseline pipeline (feature engineering,
   ranking metrics, experiment logger, config, link prediction helpers, heuristic helpers)
+- `tests/test_models.py` — 42 tests for DL models (GraphMixer architecture, TemporalCSR,
+  neighbor sampling, featurization, C++ extension correctness, chronological split)
 
 ---
 
@@ -248,10 +285,21 @@ src/
     heuristic_baselines.py  # CN, Jaccard, Adamic-Adar, PA
     runner.py           # Queue-based experiment runner
     launcher.py         # Multi-session tmux orchestrator
+  models/
+    __init__.py         # DL models package
+    graphmixer.py       # GraphMixer architecture (MLP-Mixer, no attention/GNN)
+    data_utils.py       # Event stream, TemporalCSR, neighbor sampling, featurization
+    train.py            # Training loop, validation, early stopping
+    evaluate.py         # TGB-style evaluation (50 hist + 50 random negatives)
+    launcher.py         # CLI for running experiments
+    build_ext.py        # C++ extension build script
+    csrc/
+      temporal_sampling.cpp  # C++ pybind11: TemporalCSR, batch sampling, featurization
 tests/
   test_pipeline.py      # 11 tests for the pipeline
   test_compute_features.py  # 36 tests for feature computation
-  test_baselines.py     # 32 tests for baseline pipeline
+  test_baselines.py     # 35 tests for baseline pipeline
+  test_models.py        # 42 tests for DL models and C++ extension
 data/
   samples/              # CSV samples for 2016-07-08 and 2016-07-09 (halving day)
   raw/                  # Raw ORBITAAL data (on dev machine only, gitignored)
@@ -442,12 +490,15 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
 
 ---
 
-## Next steps (2026-03-20)
+## Next steps (2026-03-21)
 
 1. ~~Baselines~~ **Done** (33/35). Results: `docs/baseline_results_for_llm.md`.
-2. **DL models for temporal link prediction** — research best architectures (TGN, TGAT, GraphSAGE, etc.),
-   implement and compare with baseline heuristics. Goal: learn structural patterns (like CN)
-   in a trainable way, target MRR 0.6-0.7+ (matching/exceeding CN=0.73 on mature periods).
+2. **DL models for temporal link prediction:**
+   - ~~GraphMixer~~ **Implemented** (2026-03-21). Code + C++ ext + 42 tests. Awaiting training on dev machine.
+   - Planned progression: GraphMixer → EAGLE → HyperEvent → GLFormer → DyGFormer → SLATE
+     (5-6 models, strictly <10, ordered by increasing compute cost).
+   - Before implementing each model: user provides paper + reference implementation.
+   - Target MRR: 0.6-0.7+ (matching/exceeding CN=0.73 on mature periods).
 3. Graph-level forecasting **deprioritized** — low ceiling, weak graph-structure connection,
    no standard benchmark. Baselines computed for completeness, not pursuing further.
 4. Pre-2010 period: filter to 2010+ or 2010-07-17+ (sparse/empty graphs before that).
