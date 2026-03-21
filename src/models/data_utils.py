@@ -156,14 +156,14 @@ def build_event_stream(
 
         nf = load_node_features(date, local_dir)
         if nf is not None:
-            for node_idx in nf.index:
+            present_cols = [c for c in NODE_FEATURE_COLUMNS if c in nf.columns]
+            col_indices = [NODE_FEATURE_COLUMNS.index(c) for c in present_cols]
+            feat_matrix = np.zeros((len(nf), len(NODE_FEATURE_COLUMNS)), dtype=np.float32)
+            feat_matrix[:, col_indices] = nf[present_cols].values.astype(np.float32)
+            for row_idx, node_idx in enumerate(nf.index):
                 if node_idx not in node_feat_accum:
                     node_feat_accum[node_idx] = []
-                feats = np.zeros(len(NODE_FEATURE_COLUMNS), dtype=np.float32)
-                for i, col in enumerate(NODE_FEATURE_COLUMNS):
-                    if col in nf.columns:
-                        feats[i] = nf.loc[node_idx, col]
-                node_feat_accum[node_idx].append(feats)
+                node_feat_accum[node_idx].append(feat_matrix[row_idx])
 
     src_all = np.concatenate(all_src)
     dst_all = np.concatenate(all_dst)
