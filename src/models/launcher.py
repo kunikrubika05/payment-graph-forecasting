@@ -100,7 +100,7 @@ def run_experiment(args: argparse.Namespace) -> None:
     logger.info("Device: %s", device)
     if device.type == "cuda":
         logger.info("GPU: %s", torch.cuda.get_device_name(0))
-        logger.info("GPU memory: %.1f GB", torch.cuda.get_device_properties(0).total_mem / 1e9)
+        logger.info("GPU memory: %.1f GB", torch.cuda.get_device_properties(0).total_memory / 1e9)
 
     logger.info("Step 1: Preparing data for period '%s'...", args.period)
     data_start = time.time()
