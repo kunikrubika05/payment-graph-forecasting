@@ -550,7 +550,7 @@ def prepare_period_data(
     token: Optional[str] = None,
     undirected: bool = True,
 ) -> Tuple[TemporalEdgeData, List[str]]:
-    """Download and prepare data for a specific period.
+    """Download and prepare data for a specific period (all days).
 
     Args:
         period_name: Key from PERIODS dict (e.g., "mature_2020q2").
@@ -576,3 +576,74 @@ def prepare_period_data(
 
     data = build_event_stream(dates, local_dir, undirected=undirected)
     return data, dates
+
+
+def prepare_sliding_window(
+    period_name: str,
+    window: int = 7,
+    target_offset: int = 0,
+    local_dir: str = "/tmp/graphmixer_data",
+    token: Optional[str] = None,
+    undirected: bool = True,
+) -> Tuple[TemporalEdgeData, List[str], np.ndarray, np.ndarray, np.ndarray]:
+    """Prepare data using sliding window: W days train, next day val, day after test.
+
+    Matches baseline protocol: train on window of W days, predict edges of next day.
+
+    Args:
+        period_name: Key from PERIODS dict.
+        window: Number of days for training context.
+        target_offset: Which window position within the period (0 = last possible).
+        local_dir: Local directory for downloaded files.
+        token: Yandex.Disk token.
+        undirected: Whether to make graph undirected.
+
+    Returns:
+        Tuple of (TemporalEdgeData, all_dates, train_mask, val_mask, test_mask).
+    """
+    if token is None:
+        token = os.environ.get("YADISK_TOKEN", "")
+
+    period = PERIODS[period_name]
+    all_dates = get_available_dates(period["start"], period["end"])
+    n_dates = len(all_dates)
+
+    needed = window + 2
+    if n_dates < needed:
+        raise ValueError(
+            f"Period {period_name} has {n_dates} dates, need at least {needed} "
+            f"(window={window} + 1 val + 1 test)"
+        )
+
+    max_offset = n_dates - needed
+    if target_offset > max_offset:
+        target_offset = max_offset
+    start_idx = max_offset - target_offset
+
+    selected_dates = all_dates[start_idx:start_idx + needed]
+    train_dates = selected_dates[:window]
+    val_date = selected_dates[window]
+    test_date = selected_dates[window + 1]
+
+    logger.info(
+        "Sliding window: train %s..%s (%d days), val %s, test %s",
+        train_dates[0], train_dates[-1], window, val_date, test_date,
+    )
+
+    download_period_data(
+        selected_dates, local_dir, token,
+        need_node_features=True, need_snapshots=True,
+    )
+
+    data = build_event_stream(selected_dates, local_dir, undirected=undirected)
+
+    train_mask = data.timestamps < window
+    val_mask = (data.timestamps >= window) & (data.timestamps < window + 1)
+    test_mask = data.timestamps >= window + 1
+
+    logger.info(
+        "Split: train=%d edges (%d days), val=%d edges (1 day), test=%d edges (1 day)",
+        train_mask.sum(), window, val_mask.sum(), test_mask.sum(),
+    )
+
+    return data, selected_dates, train_mask, val_mask, test_mask
