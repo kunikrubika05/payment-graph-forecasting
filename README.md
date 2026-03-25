@@ -71,6 +71,30 @@ Pre-computed statistics per day for quick analysis and graph-level forecasting.
 | `total_btc` | float | Sum of all transaction values (BTC) |
 | `total_usd` | float | Sum of all transaction values (USD) |
 
+## Stream graph format
+
+The stream graph pipeline (`src/build_stream_graph.py`) produces a single parquet file with all transactions sorted chronologically — the standard format for temporal GNN models (TGN, DyGFormer, TGAT).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `src_idx` | int64 | Sender node index (from global mapping) |
+| `dst_idx` | int64 | Receiver node index (from global mapping) |
+| `timestamp` | int64 | UNIX timestamp of the transaction (seconds) |
+| `btc` | float32 | Transaction value in BTC |
+| `usd` | float32 | Transaction value in USD (daily rate) |
+
+**Loading for temporal link prediction:**
+
+```python
+import pandas as pd
+
+df = pd.read_parquet("data/processed/stream_graph/2020-06-01__2020-08-31.parquet")
+# Filter to a specific week (data is sorted by timestamp)
+week_start = pd.Timestamp("2020-07-01").timestamp()
+week_end = pd.Timestamp("2020-07-07 23:59:59").timestamp()
+week_df = df[(df["timestamp"] >= week_start) & (df["timestamp"] <= week_end)]
+```
+
 ## Pipeline usage
 
 ```bash
@@ -85,6 +109,10 @@ python src/build_pipeline.py --steps mapping snapshots \
 python src/build_pipeline.py --steps download extract mapping snapshots upload \
     --zenodo-files snapshot-day
 
+# Stream graph pipeline (for temporal GNN models)
+python src/build_stream_graph.py --steps download extract process upload \
+    --start-date 2020-06-01 --end-date 2020-08-31
+
 # Run tests
 pytest tests/ -v
 ```
@@ -96,9 +124,13 @@ src/
 ├── analyze.py          # Exploratory data analysis on CSV samples
 ├── build_graphs.py     # PaymentGraph class (PyG-compatible, pickle format)
 ├── build_pipeline.py   # Main pipeline: download → mapping → snapshots → upload
+├── build_stream_graph.py # Stream graph pipeline: download → extract → process → upload
 ├── compute_features.py # Graph-level and node-level feature computation
 └── visualize.py        # Visualization scripts
 tests/
 ├── test_pipeline.py          # Pipeline tests (11 tests)
-└── test_compute_features.py  # Feature computation tests (36 tests)
+├── test_compute_features.py  # Feature computation tests (36 tests)
+├── test_baselines.py         # Baseline pipeline tests (35 tests)
+├── test_models.py            # DL models tests (42 tests)
+└── test_stream_graph.py      # Stream graph pipeline tests (16 tests)
 ```
