@@ -203,14 +203,14 @@ orbitaal_processed/experiments/
 не досчитаны из-за отключения дев-машины — некритично для выводов.
 
 **Результаты (MRR, TGB-style ranking):**
-- LogReg: 0.17-0.37 (слабая линейная модель)
-- CatBoost: 0.34-0.62
-- RF: 0.33-0.63
+- LogReg: 0.17-0.37 — needs review
+- CatBoost: 0.34-0.62 — needs review
+- RF: 0.33-0.63 — needs review
 - Heuristic CN: 0.46-0.73 (лучший метод на всех периодах)
 - Heuristic AA: 0.43-0.72, Jaccard: 0.36-0.66, PA: 0.29-0.55
 
 **Ключевые выводы:**
-- CN побеждает ML-модели с отрывом 0.02-0.13 MRR → графовая структура критически важна
+- CN побеждает ML-модели → графовая структура критически важна
 - Качество растёт от ранних (2012) к зрелым (2020) периодам
 - Размер окна, агрегация, Mode A/B влияют слабо
 - Graph-level forecasting: persistence MAPE 11-17%, ARIMA/SARIMAX улучшают на 1-3 п.п.
@@ -249,7 +249,24 @@ YADISK_TOKEN="..." PYTHONPATH=. python src/models/launcher.py \
 **Документация:** `docs/graphmixer_pipeline.md` — полное описание архитектуры, пайплайна,
 параметров CLI и структуры результатов.
 
-**Статус (2026-03-21):** Реализовано, 42 теста проходят. Ожидает запуска на дев-машине.
+**Статус (2026-03-25):** Первый эксперимент завершён на T4 (immers.cloud).
+
+**Результаты GraphMixer (mature_2020q2, window=7):**
+- Test MRR: **0.430**, Hits@1: 0.318, Hits@3: 0.464, Hits@10: 0.647
+- Val MRR: 0.538 (best epoch 100/100 — early stopping не сработал)
+- Обучение: 15.5 часов на T4, ~556 сек/эпоха, CPU bottleneck ~75% (neighbor sampling)
+- Данные: 9 дней (train 7d, val 1d, test 1d), 11M рёбер, 2.5M узлов
+
+**Выводы:**
+- GraphMixer (0.430) значительно слабее CN (0.732) — additive classifier не может
+  выучить взаимодействие src-dst (общие соседи и т.д.)
+- Модель не доучилась (best=epoch 100), потенциально +0.02-0.05 при 200 эпохах
+- CPU bottleneck: neighbor sampling занимает ~75% времени. Решение: PyG GPU sampling
+  или переход на PyTorch Geometric для следующих моделей
+- GraphMixer выполнил роль первого DL baseline. Дальше нужны модели с interaction-aware
+  scoring (TGN, DyGFormer и др.)
+
+**Инфраструктура:** `docs/dev_machine_guide.md` — инструкция по работе с GPU машиной (immers.cloud).
 
 ### Tests
 
@@ -490,15 +507,19 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
 
 ---
 
-## Next steps (2026-03-21)
+## Next steps (2026-03-25)
 
-1. ~~Baselines~~ **Done** (33/35). Results: `docs/baseline_results_for_llm.md`.
-2. **DL models for temporal link prediction:**
-   - ~~GraphMixer~~ **Implemented** (2026-03-21). Code + C++ ext + 42 tests. Awaiting training on dev machine.
-   - Planned progression: GraphMixer → EAGLE → HyperEvent → GLFormer → DyGFormer → SLATE
-     (5-6 models, strictly <10, ordered by increasing compute cost).
+1. ~~Baselines~~ **Done** (33/35). ML бейзлайны — needs review (переоценка после DL экспериментов).
+2. ~~GraphMixer~~ **Done**. Test MRR=0.430 (vs CN=0.732). Первый DL baseline зафиксирован.
+3. **Подготовить stream-graph для mature_2020q2:**
+   - Скачать `orbitaal-stream_graph.tar.gz` с Zenodo (24 GB)
+   - Извлечь и отфильтровать 2020-06-01..2020-08-31
+   - Формат: SRC_ID, DST_ID, TIMESTAMP, VALUE_SATOSHI, VALUE_USD
+   - Нужен для всех последующих DL-моделей (TGN, DyGFormer, TGAT и др.)
+4. **DL models for temporal link prediction:**
+   - Planned progression: TGN → DyGFormer → другие (по результатам).
+   - Переход на PyTorch Geometric (GPU sampling, стандартные temporal GNN).
    - Before implementing each model: user provides paper + reference implementation.
    - Target MRR: 0.6-0.7+ (matching/exceeding CN=0.73 on mature periods).
-3. Graph-level forecasting **deprioritized** — low ceiling, weak graph-structure connection,
-   no standard benchmark. Baselines computed for completeness, not pursuing further.
-4. Pre-2010 period: filter to 2010+ or 2010-07-17+ (sparse/empty graphs before that).
+5. Graph-level forecasting **deprioritized**.
+6. Pre-2010 period: filter to 2010+ or 2010-07-17+ (sparse/empty graphs before that).
