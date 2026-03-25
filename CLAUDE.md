@@ -268,9 +268,64 @@ YADISK_TOKEN="..." PYTHONPATH=. python src/models/launcher.py \
 
 **Инфраструктура:** `docs/dev_machine_guide.md` — инструкция по работе с GPU машиной (immers.cloud).
 
+### Stream graph pipeline
+
+`src/build_stream_graph.py` — пайплайн для получения stream graph из ORBITAAL dataset.
+Скачивает архив с Zenodo, извлекает нужный год, фильтрует по датам, применяет глобальный
+node mapping и сохраняет один parquet-файл, отсортированный по timestamp.
+
+**Формат выходного файла** (один parquet, стандарт для TGN/DyGFormer/TGAT):
+```
+src_idx (int64)   — source node (global mapping)
+dst_idx (int64)   — destination node (global mapping)
+timestamp (int64) — UNIX timestamp транзакции (секунды)
+btc (float32)     — VALUE_SATOSHI / 1e8
+usd (float32)     — VALUE_USD
+```
+
+Файл отсортирован по timestamp. Для обучения на подпериоде достаточно простой фильтрации
+по timestamp — данные уже в хронологическом порядке.
+
+**Запуск на дев-машине (CPU, без GPU):**
+```bash
+# 1. Подключение
+ssh -i /path/to/your-key.pem ubuntu@<IP>
+
+# 2. Настройка (один раз)
+sudo apt update && sudo apt install -y python3-venv python3-pip
+cd ~ && git clone https://github.com/kunikrubika05/payment-graph-forecasting.git
+cd payment-graph-forecasting
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# 3. Запуск в tmux
+tmux new -s stream
+cd ~/payment-graph-forecasting && source venv/bin/activate
+export YADISK_TOKEN="..."
+
+PYTHONPATH=. python src/build_stream_graph.py \
+    --steps download extract process upload \
+    --start-date 2020-06-01 --end-date 2020-08-31 \
+    2>&1 | tee /tmp/stream_graph.log
+
+# Отсоединиться: Ctrl+B, D
+```
+
+**Рекомендуемый конфиг:** `cpu.4.8.120` (4 vCPU, 8 GB RAM, 120 GB SSD) — 2837 ₽/мес.
+8 GB RAM хватит (mapping ~5 GB + данные ~3 GB). 120 GB SSD — запас для tar-распаковки.
+GPU не нужен. Время: ~1 час (скачивание 45 мин + обработка 15 мин).
+
+**Результат на Яндекс.Диске:**
+```
+orbitaal_processed/stream_graph/
+  2020-06-01__2020-08-31.parquet   # stream graph, sorted by timestamp
+  2020-06-01__2020-08-31.json      # статистика (num_edges, num_nodes, etc.)
+```
+
 ### Tests
 
-124 tests total — all passing:
+140 tests total — all passing:
 - `tests/test_pipeline.py` — 11 tests for the data pipeline
 - `tests/test_compute_features.py` — 36 tests for feature computation (correctness,
   disk cleanup, resume, edge cases)
@@ -278,6 +333,8 @@ YADISK_TOKEN="..." PYTHONPATH=. python src/models/launcher.py \
   ranking metrics, experiment logger, config, link prediction helpers, heuristic helpers)
 - `tests/test_models.py` — 42 tests for DL models (GraphMixer architecture, TemporalCSR,
   neighbor sampling, featurization, C++ extension correctness, chronological split)
+- `tests/test_stream_graph.py` — 16 tests for stream graph pipeline (date filtering,
+  entity 0 removal, self-loops, timestamp sorting, node mapping, CSV/parquet formats)
 
 ---
 
@@ -286,6 +343,7 @@ YADISK_TOKEN="..." PYTHONPATH=. python src/models/launcher.py \
 ```
 src/
   build_pipeline.py     # Main pipeline (download/extract/mapping/snapshots/upload)
+  build_stream_graph.py # Stream graph pipeline (download/extract/process/upload)
   compute_features.py   # Graph-level and node-level feature computation
   yadisk_utils.py       # Yandex.Disk API utilities (download/upload)
   build_graphs.py       # PaymentGraph class (legacy prototype, pickle format)
@@ -317,6 +375,7 @@ tests/
   test_compute_features.py  # 36 tests for feature computation
   test_baselines.py     # 35 tests for baseline pipeline
   test_models.py        # 42 tests for DL models and C++ extension
+  test_stream_graph.py  # 16 tests for stream graph pipeline
 data/
   samples/              # CSV samples for 2016-07-08 and 2016-07-09 (halving day)
   raw/                  # Raw ORBITAAL data (on dev machine only, gitignored)
@@ -441,6 +500,9 @@ orbitaal_processed/
   node_features/
     2009-01-03.parquet ... 2021-01-25.parquet  # 4144 файлов (257 пустых дней не имеют node features)
   graph_features.csv                           # 4401 строка
+  stream_graph/
+    2020-06-01__2020-08-31.parquet             # stream graph (sorted by UNIX timestamp)
+    2020-06-01__2020-08-31.json                # statistics
   experiments/                                 # Результаты экспериментов (создаётся launcher.py)
     exp_001_link_pred_baselines/
     exp_002_graph_level_baselines/
@@ -501,8 +563,8 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
 ### Current decisions
 
 - **Focus on Link Prediction.** Graph-level forecasting deprioritized (2026-03-19).
-- **Stream graph is deferred.** We focus on snapshot-day (daily aggregated graphs) for now.
-  Stream graph нужно будет скачать заново с Zenodo при необходимости (старая машинка уничтожена).
+- **Stream graph pipeline ready.** `src/build_stream_graph.py` — скачивание, фильтрация,
+  маппинг. Формат: один parquet, отсортированный по UNIX timestamp. Нужен для TGN, DyGFormer и др.
 - **Processed data** полностью на Яндекс.Диске. Новая машинка качает их через API по требованию.
 
 ---
@@ -511,11 +573,8 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
 
 1. ~~Baselines~~ **Done** (33/35). ML бейзлайны — needs review (переоценка после DL экспериментов).
 2. ~~GraphMixer~~ **Done**. Test MRR=0.430 (vs CN=0.732). Первый DL baseline зафиксирован.
-3. **Подготовить stream-graph для mature_2020q2:**
-   - Скачать `orbitaal-stream_graph.tar.gz` с Zenodo (24 GB)
-   - Извлечь и отфильтровать 2020-06-01..2020-08-31
-   - Формат: SRC_ID, DST_ID, TIMESTAMP, VALUE_SATOSHI, VALUE_USD
-   - Нужен для всех последующих DL-моделей (TGN, DyGFormer, TGAT и др.)
+3. **Stream-graph pipeline готов.** `src/build_stream_graph.py` написан и протестирован (16 тестов).
+   Нужно запустить на дев-машине (`cpu.4.8.120`, ~1 час). Результат: один parquet на Яндекс.Диске.
 4. **DL models for temporal link prediction:**
    - Planned progression: TGN → DyGFormer → другие (по результатам).
    - Переход на PyTorch Geometric (GPU sampling, стандартные temporal GNN).
