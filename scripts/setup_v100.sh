@@ -1,90 +1,95 @@
 #!/bin/bash
 ###############################################################################
-# setup_v100.sh — Full setup for V100 GPU dev machine (immers.cloud or similar)
+# setup_v100.sh — Full setup for V100 GPU dev machine
 #
-# Tested on: Ubuntu 24.04 + CUDA 12.8 image, Tesla V100-PCIE-32GB
-# PyTorch:   2.5.1+cu121 (last version supporting V100 compute capability 7.0)
+# Handles EVERYTHING from bare Ubuntu 24.04 + CUDA image to ready-to-run state:
+#   - NVIDIA proprietary driver (open driver is incompatible with V100/Volta)
+#   - System packages
+#   - Python venv + PyTorch 2.5.1+cu121 + PyG + all dependencies
+#   - C++ and CUDA extension builds
+#   - Verification tests
+#
+# Tested on: immers.cloud Ubuntu 24.04 + CUDA 12.8, Tesla V100-PCIE-32GB, 32GB RAM
 #
 # Usage:
-#   ssh -i ~/Downloads/<key>.pem ubuntu@<ip>
 #   git clone https://github.com/kunikrubika05/payment-graph-forecasting.git
 #   cd payment-graph-forecasting
 #   bash scripts/setup_v100.sh 2>&1 | tee /tmp/setup_v100.log
 #
-# After setup:
-#   source venv/bin/activate
-#   PYTHONPATH=. python scripts/bench_sampling.py --cuda 2>&1 | tee /tmp/bench.log
+# If the script reboots the machine (driver install), just re-run after reboot.
 ###############################################################################
 
 log()  { echo "[$(date +%H:%M:%S)] $*"; }
 warn() { echo "[$(date +%H:%M:%S)] WARNING: $*"; }
 die()  { echo "[$(date +%H:%M:%S)] ERROR: $*"; exit 1; }
 
-###############################################################################
-# 1. NVIDIA driver
-###############################################################################
-log "=== Step 1/8: NVIDIA driver ==="
-
 test "$(uname)" = "Linux" || die "Linux only"
 
+###############################################################################
+log "=== Step 1/7: NVIDIA driver ==="
+###############################################################################
+
 if nvidia-smi >/dev/null 2>&1; then
-    log "NVIDIA driver already working"
+    log "NVIDIA driver OK"
+    nvidia-smi
 else
-    log "NVIDIA driver not responding — installing..."
+    log "NVIDIA driver not working — installing proprietary driver..."
+    log "(V100 = Volta, needs closed driver, NOT nvidia-*-open)"
+
     sudo apt update -qq
-    sudo apt install -y -qq linux-headers-$(uname -r)
-    sudo apt install -y nvidia-driver-550-server
-    log "Driver installed. Loading kernel module..."
+    sudo apt install -y linux-headers-$(uname -r)
+
+    sudo apt remove -y nvidia-driver-570-open nvidia-dkms-570-open \
+        nvidia-kernel-source-570-open 2>/dev/null || true
+
+    if ! sudo apt install -y nvidia-driver-570-server; then
+        log "nvidia-driver-570-server failed, trying ubuntu-drivers..."
+        sudo apt install -y ubuntu-drivers-common
+        sudo ubuntu-drivers autoinstall
+    fi
+
     sudo modprobe nvidia || true
-    if ! nvidia-smi >/dev/null 2>&1; then
-        log "modprobe didn't help — rebooting in 5 seconds..."
-        log "After reboot, run this script again."
-        sleep 5
+
+    if nvidia-smi >/dev/null 2>&1; then
+        log "Driver loaded without reboot"
+        nvidia-smi
+    else
+        log "Reboot required. Re-run this script after reboot."
+        sleep 3
         sudo reboot
     fi
 fi
 
-GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo "unknown")
-log "GPU: $GPU_NAME"
-
-nvidia-smi
-
 ###############################################################################
-# 2. System dependencies
+log "=== Step 2/7: System packages ==="
 ###############################################################################
-log "=== Step 2/8: System dependencies ==="
 
-log "Python: $(python3 --version 2>&1)"
-
-log "Installing system packages..."
 sudo apt update -qq
 sudo apt install -y -qq python3-venv python3-dev git tmux
+log "System packages OK"
 
 ###############################################################################
-# 3. Python venv
+log "=== Step 3/7: Python venv ==="
 ###############################################################################
-log "=== Step 3/8: Python venv ==="
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
-log "Working directory: $REPO_DIR"
+log "Repo: $REPO_DIR"
 
 if [ ! -d "venv" ]; then
-    log "Creating venv..."
     python3 -m venv venv
+    log "Created venv"
 else
-    log "venv already exists"
+    log "venv exists"
 fi
 
 . venv/bin/activate
-log "Activated venv: $(which python)"
-
 pip install --upgrade pip -q
+log "Python: $(python --version), pip: $(pip --version | awk '{print $2}')"
 
 ###############################################################################
-# 4. PyTorch 2.5.1+cu121 (V100-compatible)
+log "=== Step 4/7: PyTorch + dependencies ==="
 ###############################################################################
-log "=== Step 4/8: PyTorch installation ==="
 
 TORCH_VER=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
 
@@ -95,10 +100,13 @@ else
     pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121 -q
 fi
 
-log "Installing other dependencies..."
-pip install numpy pytest tqdm pandas pyarrow pybind11 -q
-
+log "Installing Python dependencies..."
+pip install numpy scipy pytest tqdm pandas pyarrow pybind11 requests matplotlib -q
 python -c "import ninja" 2>/dev/null || pip install ninja -q
+
+log "Installing PyG (torch-geometric)..."
+pip install torch-geometric torch-scatter torch-sparse \
+    -q -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
 
 log "Verifying PyTorch + CUDA..."
 python -c "
@@ -106,31 +114,31 @@ import torch
 print(f'  PyTorch: {torch.__version__}')
 print(f'  CUDA available: {torch.cuda.is_available()}')
 if torch.cuda.is_available():
-    print(f'  CUDA device: {torch.cuda.get_device_name(0)}')
-    print(f'  CUDA version (runtime): {torch.version.cuda}')
+    print(f'  Device: {torch.cuda.get_device_name(0)}')
+    print(f'  CUDA runtime: {torch.version.cuda}')
     x = torch.randn(2, 2, device='cuda')
-    print(f'  GPU tensor test: OK ({x.device})')
+    print(f'  GPU tensor: OK')
+else:
+    raise RuntimeError('CUDA not available!')
 "
-
-python -c "import torch; assert torch.cuda.is_available()" || die "PyTorch cannot access CUDA"
+python -c "import torch; assert torch.cuda.is_available()" || die "PyTorch CUDA check failed"
+log "PyTorch + CUDA OK"
 
 ###############################################################################
-# 5. Build C++ extension
+log "=== Step 5/7: Build C++ extension ==="
 ###############################################################################
-log "=== Step 5/8: Build C++ extension ==="
 
 if [ -f "src/models/csrc/temporal_sampling.cpp" ]; then
-    log "Compiling temporal_sampling_cpp..."
-    python src/models/build_ext.py 2>&1 | tail -5
-    log "C++ extension built"
+    log "Compiling C++ extension..."
+    python src/models/build_ext.py 2>&1 | tail -3
+    log "C++ extension OK"
 else
-    warn "temporal_sampling.cpp not found — skipping"
+    warn "temporal_sampling.cpp not found"
 fi
 
 ###############################################################################
-# 6. Build CUDA extension
+log "=== Step 6/7: Build CUDA extension ==="
 ###############################################################################
-log "=== Step 6/8: Build CUDA extension ==="
 
 if [ -f "src/models/csrc/temporal_sampling.cu" ]; then
     NVCC_PATH=$(command -v nvcc 2>/dev/null || true)
@@ -141,46 +149,36 @@ if [ -f "src/models/csrc/temporal_sampling.cu" ]; then
                 export CUDA_HOME="$d"
                 export PATH="$CUDA_HOME/bin:$PATH"
                 NVCC_PATH="$d/bin/nvcc"
-                log "Found nvcc at $NVCC_PATH"
                 break
             fi
         done
     fi
 
     if [ -z "$NVCC_PATH" ]; then
-        warn "nvcc not found — skipping CUDA build"
+        warn "nvcc not found — cannot build CUDA extension"
     else
-        log "nvcc: $($NVCC_PATH --version 2>&1 | tail -1)"
         export TORCH_CUDA_ARCH_LIST="7.0"
-        log "TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST"
-        log "Compiling temporal_sampling_cuda (may take 1-2 minutes)..."
-        python src/models/build_ext.py --cuda 2>&1 | tail -5
-        log "CUDA extension built"
+        log "nvcc found, TORCH_CUDA_ARCH_LIST=7.0"
+        log "Compiling CUDA extension (1-2 min)..."
+        python src/models/build_ext.py --cuda 2>&1 | tail -3
+        log "CUDA extension OK"
     fi
 else
-    warn "temporal_sampling.cu not found — skipping"
+    warn "temporal_sampling.cu not found"
 fi
 
 ###############################################################################
-# 7. Verification
+log "=== Step 7/7: Tests ==="
 ###############################################################################
-log "=== Step 7/8: Verification ==="
 
-log "Running tests..."
-PYTHONPATH=. python -m pytest tests/test_temporal_sampler.py -v --tb=short 2>&1 | tail -20
+PYTHONPATH=. python -m pytest tests/test_temporal_sampler.py -v --tb=short 2>&1 | tail -25
 
-log "=== Step 8/8: Done ==="
-echo ""
 log "=============================================="
 log "  SETUP COMPLETE"
 log "=============================================="
 echo ""
-echo "Next steps:"
+echo "Next:"
 echo "  source venv/bin/activate"
-echo ""
-echo "  # Run benchmark"
-echo "  PYTHONPATH=. python scripts/bench_sampling.py --cuda 2>&1 | tee /tmp/bench.log"
-echo ""
-echo "  # Run CUDA comparison experiment"
+echo "  export YADISK_TOKEN=\"...\""
 echo "  bash scripts/run_cuda_comparison.sh 2>&1 | tee /tmp/cuda_comparison.log"
 echo ""
