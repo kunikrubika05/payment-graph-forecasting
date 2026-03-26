@@ -647,3 +647,46 @@ def prepare_sliding_window(
     )
 
     return data, selected_dates, train_mask, val_mask, test_mask
+
+
+def build_unified_sampler(
+    data: TemporalEdgeData,
+    mask: Optional[np.ndarray] = None,
+    backend: str = "auto",
+):
+    """Create a TemporalGraphSampler from TemporalEdgeData.
+
+    Drop-in bridge between existing pipeline and the new unified sampler.
+    Supports 'python', 'cpp', 'cuda', or 'auto' backends.
+
+    Args:
+        data: TemporalEdgeData (from build_event_stream or prepare_period_data).
+        mask: Optional boolean mask to select subset of edges (e.g., train only).
+        backend: 'auto', 'python', 'cpp', or 'cuda'.
+
+    Returns:
+        TemporalGraphSampler instance with the selected backend.
+    """
+    from src.models.temporal_graph_sampler import TemporalGraphSampler
+
+    if mask is not None:
+        src = data.src[mask]
+        dst = data.dst[mask]
+        ts = data.timestamps[mask]
+        eids = np.where(mask)[0].astype(np.int64)
+    else:
+        src = data.src
+        dst = data.dst
+        ts = data.timestamps
+        eids = np.arange(len(data.src), dtype=np.int64)
+
+    return TemporalGraphSampler(
+        num_nodes=data.num_nodes,
+        src=src,
+        dst=dst,
+        timestamps=ts,
+        edge_ids=eids,
+        node_feats=data.node_feats,
+        edge_feats=data.edge_feats,
+        backend=backend,
+    )
