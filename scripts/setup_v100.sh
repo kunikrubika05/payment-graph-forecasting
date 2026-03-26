@@ -41,16 +41,18 @@ fi
 
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
 DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
-CUDA_VERSION=$(nvidia-smi | grep -oP 'CUDA Version: \K[0-9.]+' || echo "unknown")
+CUDA_VERSION=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9.]+' || true)
+[[ -z "$CUDA_VERSION" ]] && CUDA_VERSION="unknown"
 
 log "GPU: $GPU_NAME"
 log "Driver: $DRIVER_VERSION"
 log "CUDA (driver): $CUDA_VERSION"
 
-COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 2>/dev/null || echo "unknown")
+COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 || true)
+[[ -z "$COMPUTE_CAP" ]] && COMPUTE_CAP="unknown"
 log "Compute capability: $COMPUTE_CAP"
 
-if [[ "$COMPUTE_CAP" == "7.0" ]] || echo "$GPU_NAME" | grep -qi "v100"; then
+if [[ "$COMPUTE_CAP" == "7.0" ]] || [[ "${GPU_NAME,,}" == *"v100"* ]]; then
     log "V100 detected — will use PyTorch 2.5.1+cu121"
 else
     warn "Not a V100 ($GPU_NAME, cc=$COMPUTE_CAP). Script may still work, but is optimized for V100."
