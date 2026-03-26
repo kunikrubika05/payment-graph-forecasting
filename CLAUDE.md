@@ -268,6 +268,60 @@ YADISK_TOKEN="..." PYTHONPATH=. python src/models/launcher.py \
 
 **Инфраструктура:** `docs/dev_machine_guide.md` — инструкция по работе с GPU машиной (immers.cloud).
 
+### CUDA temporal sampling module
+
+`src/models/temporal_graph_sampler.py` — универсальный модуль для GPU-ускоренного
+temporal neighbor sampling. Три бэкенда: Python (NumPy), C++ (pybind11), CUDA.
+
+**Что делает:**
+1. **sample_neighbors** — для batch запросов (node, time) находит K последних соседей
+   с timestamp < time через binary search в CSR. Соседи = исходящие рёбра (src→dst).
+2. **featurize** — собирает node/edge features и relative timestamps для найденных соседей.
+3. **sample_negatives** — генерация негативных кандидатов (random, historical, mixed).
+
+**Файлы:**
+- `src/models/temporal_graph_sampler.py` — Python wrapper, `TemporalGraphSampler` класс
+- `src/models/csrc/temporal_sampling.cu` — CUDA-ядра (`sample_neighbors_kernel`,
+  `featurize_neighbors_kernel`, `TemporalCSR_CUDA`)
+- `src/models/csrc/temporal_sampling.cpp` — C++ бэкенд (существовал ранее)
+- `src/models/build_ext.py` — компиляция (`--cuda` / `--all`)
+- `tests/test_temporal_sampler.py` — 30 тестов (корректность всех бэкендов, cross-validation)
+- `scripts/bench_sampling.py` — бенчмарк (5 сценариев, warmup + measurement)
+
+**Бенчмарк (V100-32GB):**
+
+| Сценарий | Python | C++ | CUDA | Speedup vs Python |
+|----------|--------|-----|------|-------------------|
+| GraphMixer (B=512, K=20) | 23ms | 2.2ms | 0.2ms | 110x |
+| DyGFormer (B=2048, K=512) | 1740ms | 104ms | 1.0ms | 1689x |
+
+**Setup на GPU машине:** `bash scripts/setup_v100.sh` — автоматическая настройка
+V100 (PyTorch 2.5.1+cu121, компиляция расширений, тесты).
+
+**Статус (2026-03-26):** Модуль завершён. 30/30 тестов passing. Бенчмарк подтверждён на V100.
+
+### GLFormer_cuda — CUDA-ускоренный pipeline обучения
+
+`src/models/GLFormer_cuda/` — версия GLFormer pipeline, использующая
+`TemporalGraphSampler` (CUDA) вместо стандартного C++/Python сэмплинга.
+
+**Отличие от GLFormer/:** только бэкенд сэмплинга. Модель (`GLFormerTime`),
+loss, optimizer, протокол оценки — идентичны. Код train/evaluate/launcher
+переписан для вызова `sampler.sample_neighbors()` + `sampler.featurize()`.
+
+**Файлы:**
+- `src/models/GLFormer_cuda/data_utils.py` — `build_cuda_sampler()`, re-exports
+- `src/models/GLFormer_cuda/glformer_train.py` — `train_glformer_cuda()`, `prepare_glformer_batch_cuda()`
+- `src/models/GLFormer_cuda/glformer_evaluate.py` — `evaluate_tgb_style()` с CUDA сэмплингом
+- `src/models/GLFormer_cuda/glformer_launcher.py` — CLI launcher (`--sampling-backend`)
+
+**Сравнительный эксперимент (запланирован):**
+- `exps/exp_005_glformer_baseline/` — GLFormer с C++ сэмплингом, 10 эпох
+- `exps/exp_006_glformer_cuda/` — GLFormer с CUDA сэмплингом, 10 эпох
+- Данные: 1-неделя из stream graph (2020-07-01 — 2020-07-07)
+- Запуск: `bash scripts/run_cuda_comparison.sh` на V100
+- Цель: замерить speedup epoch_time, проверить совпадение метрик
+
 ### Stream graph pipeline
 
 `src/build_stream_graph.py` — пайплайн для получения stream graph из ORBITAAL dataset.
@@ -290,6 +344,7 @@ usd (float32)     — VALUE_USD
 ```bash
 # 1. Подключение
 ssh -i /path/to/your-key.pem ubuntu@<IP>
+chmod 600 /path/to/your-key.pem
 
 # 2. Настройка (один раз)
 sudo apt update && sudo apt install -y python3-venv python3-pip
@@ -309,6 +364,11 @@ PYTHONPATH=. python src/build_stream_graph.py \
     --start-date 2020-06-01 --end-date 2020-08-31 \
     2>&1 | tee /tmp/stream_graph.log
 
+PYTHONPATH=. python src/build_stream_graph.py \
+    --steps extract process upload \
+    --start-date 2020-06-01 --end-date 2020-08-31 \
+    2>&1 | tee /tmp/stream_graph.log
+
 # Отсоединиться: Ctrl+B, D
 ```
 
@@ -325,7 +385,7 @@ orbitaal_processed/stream_graph/
 
 ### Tests
 
-140 tests total — all passing:
+170 tests total — all passing:
 - `tests/test_pipeline.py` — 11 tests for the data pipeline
 - `tests/test_compute_features.py` — 36 tests for feature computation (correctness,
   disk cleanup, resume, edge cases)
@@ -335,6 +395,8 @@ orbitaal_processed/stream_graph/
   neighbor sampling, featurization, C++ extension correctness, chronological split)
 - `tests/test_stream_graph.py` — 16 tests for stream graph pipeline (date filtering,
   entity 0 removal, self-loops, timestamp sorting, node mapping, CSV/parquet formats)
+- `tests/test_temporal_sampler.py` — 30 tests for CUDA sampling module (Python/C++/CUDA
+  backend equivalence, negative sampling, edge cases, cross-validation)
 
 ---
 
@@ -364,12 +426,16 @@ src/
     __init__.py         # DL models package
     graphmixer.py       # GraphMixer architecture (MLP-Mixer, no attention/GNN)
     data_utils.py       # Event stream, TemporalCSR, neighbor sampling, featurization
+    temporal_graph_sampler.py  # Unified sampler: Python/C++/CUDA backends
     train.py            # Training loop, validation, early stopping
     evaluate.py         # TGB-style evaluation (50 hist + 50 random negatives)
     launcher.py         # CLI for running experiments
-    build_ext.py        # C++ extension build script
+    build_ext.py        # C++/CUDA extension build script (--cuda / --all)
     csrc/
       temporal_sampling.cpp  # C++ pybind11: TemporalCSR, batch sampling, featurization
+      temporal_sampling.cu   # CUDA: GPU-parallel sampling + featurization
+    GLFormer/           # GLFormer model (standard C++/Python sampling)
+    GLFormer_cuda/      # GLFormer with CUDA-accelerated sampling
 tests/
   test_pipeline.py      # 11 tests for the pipeline
   test_compute_features.py  # 36 tests for feature computation
@@ -569,16 +635,18 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
 
 ---
 
-## Next steps (2026-03-25)
+## Next steps (2026-03-27)
 
-1. ~~Baselines~~ **Done** (33/35). ML бейзлайны — needs review (переоценка после DL экспериментов).
-2. ~~GraphMixer~~ **Done**. Test MRR=0.430 (vs CN=0.732). Первый DL baseline зафиксирован.
-3. **Stream-graph pipeline готов.** `src/build_stream_graph.py` написан и протестирован (16 тестов).
-   Нужно запустить на дев-машине (`cpu.4.8.120`, ~1 час). Результат: один parquet на Яндекс.Диске.
-4. **DL models for temporal link prediction:**
-   - Planned progression: TGN → DyGFormer → другие (по результатам).
-   - Переход на PyTorch Geometric (GPU sampling, стандартные temporal GNN).
-   - Before implementing each model: user provides paper + reference implementation.
+1. ~~Baselines~~ **Done** (33/35). ML бейзлайны — needs review.
+2. ~~GraphMixer~~ **Done**. Test MRR=0.430 (vs CN=0.732). Первый DL baseline.
+3. ~~Stream-graph pipeline~~ **Done.** Результат на Яндекс.Диске.
+4. ~~CUDA temporal sampling module~~ **Done.** 30/30 тестов, бенчмарк 50-1700x speedup.
+5. ~~GLFormer_cuda pipeline~~ **Done.** `src/models/GLFormer_cuda/` — готов к запуску.
+6. **Следующий шаг:** Запустить exp_005 + exp_006 на V100 (`bash scripts/run_cuda_comparison.sh`).
+   Нарезать 1-неделю (`scripts/slice_stream_graph.py`), 10 эпох каждого, сравнить epoch_time.
+7. **DL models for temporal link prediction:**
+   - GLFormer — текущая модель (Adaptive Token Mixer + concatenation predictor).
+   - После эксперимента: обучить GLFormer на полном графе с CUDA сэмплингом.
    - Target MRR: 0.6-0.7+ (matching/exceeding CN=0.73 on mature periods).
-5. Graph-level forecasting **deprioritized**.
-6. Pre-2010 period: filter to 2010+ or 2010-07-17+ (sparse/empty graphs before that).
+8. Graph-level forecasting **deprioritized**.
+9. Pre-2010 period: filter to 2010+ or 2010-07-17+ (sparse/empty graphs before that).
