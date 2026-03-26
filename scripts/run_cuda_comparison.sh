@@ -15,7 +15,7 @@
 #   4. Runs GLFormer CUDA (CUDA sampling) — 10 epochs
 #   5. Prints comparison table
 ###############################################################################
-set -euo pipefail
+# No set -e: we handle errors explicitly
 
 PARQUET_FULL="/tmp/stream_graph_full.parquet"
 PARQUET_1WEEK="/tmp/stream_graph_1week.parquet"
