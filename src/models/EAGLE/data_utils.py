@@ -92,7 +92,7 @@ def temporal_data_to_edge_data(
     src = data.src.numpy().astype(np.int32)
     dst = data.dst.numpy().astype(np.int32)
     timestamps = data.t.numpy().astype(np.float64)
-    edge_feats = data.msg.numpy().astype(np.float32)
+    edge_feats = np.log1p(data.msg.numpy().astype(np.float32))
 
     order = np.argsort(timestamps, kind="stable")
     src = src[order]
