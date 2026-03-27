@@ -98,7 +98,7 @@ def create_objective(
         lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
         weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
         dropout = trial.suggest_float("dropout", 0.0, 0.3, step=0.05)
-        batch_size = trial.suggest_categorical("batch_size", [200, 400, 600])
+        batch_size = 4000
         channel_expansion = trial.suggest_categorical(
             "channel_expansion", [2.0, 4.0]
         )
