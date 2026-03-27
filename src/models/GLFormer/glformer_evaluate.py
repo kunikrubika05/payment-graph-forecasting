@@ -12,7 +12,7 @@ candidate destination are computed before scoring and passed to the model.
 import contextlib
 import logging
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 import torch
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 def _amp_autocast(enabled: bool, device_type: str):
     """Return AMP autocast context or a no-op context manager."""
     if enabled and device_type == "cuda":
-        return torch.cuda.amp.autocast()
+        return torch.amp.autocast("cuda")
     return contextlib.nullcontext()
 
 
@@ -51,6 +51,7 @@ def evaluate_tgb_style(
     n_random_neg: int = 50,
     use_amp: bool = True,
     seed: int = 42,
+    max_edges: Optional[int] = None,
 ) -> Dict[str, float]:
     """Full TGB-style evaluation matching the baseline protocol.
 
@@ -79,6 +80,9 @@ def evaluate_tgb_style(
         n_random_neg: Number of random negatives per query.
         use_amp: Enable mixed precision.
         seed: Random seed for negative sampling.
+        max_edges: If set, subsample this many edges from eval_mask
+            (random without replacement). Useful for fast evaluation
+            during development; set to None for full evaluation.
 
     Returns:
         Dict with MRR, Hits@1, Hits@3, Hits@10, eval_time_sec,
@@ -93,6 +97,9 @@ def evaluate_tgb_style(
     use_cooc = model.use_cooccurrence
 
     eval_indices = np.where(eval_mask)[0]
+    if max_edges is not None and max_edges < len(eval_indices):
+        eval_indices = rng.choice(eval_indices, size=max_edges, replace=False)
+        eval_indices.sort()
     n_total = len(eval_indices)
     logger.info(
         "GLFormer TGB-style eval: %d edges, %d negatives each",
