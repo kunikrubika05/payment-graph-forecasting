@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 def _amp_autocast(enabled: bool, device_type: str):
     """Return AMP autocast context or a no-op context manager."""
     if enabled and device_type == "cuda":
-        return torch.cuda.amp.autocast()
+        return torch.amp.autocast("cuda")
     return contextlib.nullcontext()
 
 
@@ -595,7 +595,7 @@ def train_glformer(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
     amp_enabled = use_amp and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
     train_indices = np.where(train_mask)[0]
     val_indices = np.where(val_mask)[0]

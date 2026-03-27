@@ -6,15 +6,13 @@
 #
 # Usage:
 #   source venv/bin/activate
-#   bash scripts/run_cuda_comparison.sh [--epochs N] [--batch-size N] 2>&1 | tee /tmp/cuda_comparison.log
+#   bash scripts/run_cuda_comparison.sh [--epochs N] [--batch-size N] [--max-test-edges N] \
+#       2>&1 | tee /tmp/cuda_comparison.log
 #
 # Options:
-#   --epochs N       Number of training epochs (default: 3)
-#   --batch-size N   Training batch size (default: 4000)
-#
-# Examples:
-#   bash scripts/run_cuda_comparison.sh 2>&1 | tee /tmp/cuda_comparison.log
-#   bash scripts/run_cuda_comparison.sh --epochs 10 --batch-size 2000 2>&1 | tee /tmp/cuda_comparison.log
+#   --epochs N            Number of training epochs (default: 3)
+#   --batch-size N        Training batch size (default: 4000)
+#   --max-test-edges N    Subsample test set for fast eval (default: 5000)
 #
 # What it does:
 #   1. Downloads stream graph from Yandex.Disk (if needed)
@@ -31,6 +29,7 @@ START_DATE="2020-07-01"
 END_DATE="2020-07-07"
 EPOCHS=3
 BATCH_SIZE=4000
+MAX_TEST_EDGES=5000
 NUM_NEIGHBORS=20
 SEED=42
 OUTPUT_BASELINE="/tmp/exp_005_results"
@@ -39,14 +38,15 @@ OUTPUT_CUDA="/tmp/exp_006_results"
 # Parse CLI flags
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --epochs)    EPOCHS="$2";     shift 2 ;;
-        --batch-size) BATCH_SIZE="$2"; shift 2 ;;
+        --epochs)          EPOCHS="$2";          shift 2 ;;
+        --batch-size)      BATCH_SIZE="$2";      shift 2 ;;
+        --max-test-edges)  MAX_TEST_EDGES="$2";  shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
-log "Config: epochs=$EPOCHS, batch_size=$BATCH_SIZE, K=$NUM_NEIGHBORS"
+log "Config: epochs=$EPOCHS, batch_size=$BATCH_SIZE, max_test_edges=$MAX_TEST_EDGES, K=$NUM_NEIGHBORS"
 
 ###############################################################################
 # Step 1: Get stream graph data
@@ -96,6 +96,7 @@ PYTHONPATH=. python src/models/GLFormer/glformer_launcher.py \
     --batch-size "$BATCH_SIZE" \
     --num-neighbors "$NUM_NEIGHBORS" \
     --seed "$SEED" \
+    --max-test-edges "$MAX_TEST_EDGES" \
     --output "$OUTPUT_BASELINE"
 
 kill $GPU_MON_PID 2>/dev/null || true
@@ -122,6 +123,7 @@ PYTHONPATH=. python src/models/GLFormer_cuda/glformer_launcher.py \
     --batch-size "$BATCH_SIZE" \
     --num-neighbors "$NUM_NEIGHBORS" \
     --seed "$SEED" \
+    --max-test-edges "$MAX_TEST_EDGES" \
     --sampling-backend auto \
     --output "$OUTPUT_CUDA"
 

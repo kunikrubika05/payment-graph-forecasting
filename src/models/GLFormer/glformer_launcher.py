@@ -164,6 +164,7 @@ def run_experiment(args):
         n_random_neg=50,
         use_amp=not args.no_amp,
         seed=args.seed,
+        max_edges=args.max_test_edges,
     )
     eval_time = time.time() - eval_start
     total_time = time.time() - total_start
@@ -267,6 +268,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--max-val-edges", type=int, default=5000)
+    parser.add_argument(
+        "--max-test-edges", type=int, default=None,
+        help="Subsample test set for fast evaluation (default: full test set)",
+    )
     parser.add_argument(
         "--edge-feat-dim", type=int, default=2,
         help="Dimension of per-neighbor edge features. "
