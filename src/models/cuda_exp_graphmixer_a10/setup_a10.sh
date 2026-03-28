@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # setup_a10.sh — Full environment setup for NVIDIA A10 (Ampere, CC 8.6)
 #
-# Run once after creating the machine:
+# Run once after creating the machine (teslaa10-1.4.32.160 on immers.cloud):
 #   bash src/models/cuda_exp_graphmixer_a10/setup_a10.sh
 #
 # What it does:
-#   1. Installs NVIDIA driver 550 (proprietary, compatible with Ampere)
-#   2. Installs CUDA toolkit 12.4
+#   1. Checks NVIDIA driver (A10 on immers.cloud ships with 570, skips install)
+#   2. Installs system deps: python3.12-dev, git, tmux, optuna
 #   3. Creates Python venv with PyTorch 2.5.1+cu121
 #   4. Clones repo and installs requirements
 #   5. Compiles C++/CUDA extensions (TORCH_CUDA_ARCH_LIST="8.6")
 #   6. Runs 30 tests to verify everything works
 #
-# A10 specs: Ampere architecture, compute capability 8.6, 24GB GDDR6
+# A10 specs: Ampere CC 8.6, 24GB VRAM, 32GB RAM, 160GB SSD
 
 set -uo pipefail
 
@@ -21,28 +21,24 @@ echo "=== A10 Setup: $(date) ==="
 # ── 1. NVIDIA driver ───────────────────────────────────────────────────────────
 echo "[1/6] Checking NVIDIA driver..."
 if nvidia-smi &>/dev/null; then
-    echo "    Driver already working, skipping install."
+    echo "    Driver already working ($(nvidia-smi --query-gpu=driver_version --format=csv,noheader)), skipping install."
 else
     echo "    Driver not found, installing nvidia-driver-550-server..."
     sudo apt-get update -qq
     sudo apt-get install -y linux-headers-$(uname -r)
     sudo apt-get install -y nvidia-driver-550-server
-
     echo "    Rebooting to load driver — re-run script after reboot."
     sudo reboot
     exit 0
 fi
 
-# ── 2. Verify driver + CUDA ────────────────────────────────────────────────────
-echo "[2/6] Verifying driver..."
-nvidia-smi || { echo "ERROR: nvidia-smi failed."; exit 1; }
-echo "    nvcc version:"
-nvcc --version 2>/dev/null || echo "    (nvcc not found, will use PyTorch-bundled CUDA)"
+# ── 2. System dependencies ─────────────────────────────────────────────────────
+echo "[2/6] Installing system dependencies..."
+sudo apt-get update -qq
+sudo apt-get install -y python3-venv python3-pip python3-dev git tmux -qq
 
 # ── 3. Python environment ──────────────────────────────────────────────────────
 echo "[3/6] Setting up Python venv..."
-sudo apt-get install -y python3-venv python3-pip git tmux -qq
-
 cd ~
 if [ ! -d "payment-graph-forecasting" ]; then
     git clone https://github.com/kunikrubika05/payment-graph-forecasting.git
@@ -52,13 +48,12 @@ git pull
 
 python3 -m venv venv
 source venv/bin/activate
-
 pip install --upgrade pip -q
 
 # ── 4. PyTorch 2.5.1 + CUDA 12.1 ──────────────────────────────────────────────
 echo "[4/6] Installing PyTorch 2.5.1+cu121..."
-pip install torch==2.5.1+cu121 \
-    --index-url https://download.pytorch.org/whl/cu121 -q
+pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121 -q
+pip install optuna -q
 
 echo "    Verifying PyTorch CUDA..."
 python -c "
@@ -86,17 +81,17 @@ PYTHONPATH=. python -m pytest tests/test_models.py -v --tb=short -q
 echo ""
 echo "=== Setup complete! ==="
 echo ""
-echo "To run the benchmark:"
-echo "  cd ~/payment-graph-forecasting"
-echo "  tmux new -s cuda_exp"
+echo "Next steps:"
+echo "  tmux new -s exp"
 echo "  source venv/bin/activate"
 echo "  export YADISK_TOKEN='...'"
-echo "  # Download stream graph first:"
-echo "  PYTHONPATH=. python src/yadisk_utils.py download \\"
-echo "      orbitaal_processed/stream_graph/2020-06-01__2020-08-31.parquet \\"
-echo "      stream_graph/2020-06-01_2020-08-31.parquet"
-echo "  # Run benchmark:"
-echo "  bash src/models/cuda_exp_graphmixer_a10/run_experiment.sh"
 echo ""
-echo "Expected total time: ~18 min"
-echo "Expected C++→CUDA speedup: ~3-4x"
+echo "  # Download stream graph (use variable to avoid line-break issues):"
+echo "  P=\"orbitaal_processed/stream_graph/2020-06-01__2020-08-31.parquet\""
+echo "  PYTHONPATH=. python scripts/slice_stream_graph.py --yadisk-path \"\$P\" --start 2020-07-01 --end 2020-07-07 --output stream_graph/week.parquet"
+echo ""
+echo "  # HPO (~3-4h):"
+echo "  PYTHONPATH=. python src/models/GraphMixer/graphmixer_hpo.py --parquet-path stream_graph/week.parquet --n-trials 20 --hpo-epochs 10 --output /tmp/graphmixer_hpo 2>&1 | tee /tmp/hpo.log"
+echo ""
+echo "  # Final training with best params (see /tmp/graphmixer_hpo/best_train_command.sh):"
+echo "  bash /tmp/graphmixer_hpo/best_train_command.sh"
