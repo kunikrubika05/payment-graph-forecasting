@@ -549,6 +549,27 @@ Branch naming: `feature/<name>`, `fix/<name>`, `experiment/<name>`
 - **PyTorch:** 2.5.1+cu121 (TORCH_CUDA_ARCH_LIST="7.0")
 - **Расширения:** temporal_sampling_cpp + temporal_sampling_cuda (30/30 тестов)
 
+**A10 (Ampere CC 8.6) — уроки из настройки (2026-03-28):**
+- Setup-скрипт для A10: `bash src/models/cuda_exp_graphmixer_a10/setup_a10.sh`
+- Перед установкой драйвера скрипт проверяет `nvidia-smi` — если работает, пропускает установку.
+  Immers.cloud A10 поставляется с nvidia-driver-570 уже установленным.
+- **ВАЖНО:** нужен `python3.12-dev` для компиляции C++/CUDA расширений (без него `Python.h` не найден).
+  Скрипт устанавливает его автоматически.
+- **OOM:** 3 месяца stream graph (~56M directed edges, ~112M undirected) не помещаются в RAM.
+  Для бенчмарка использовать 1 неделю (`stream_graph/week.parquet`, 4.7M directed, 9.4M undirected).
+  Нарезать через `scripts/slice_stream_graph.py`.
+
+**Скачивание файла с Яндекс.Диска на машину (нет CLI в yadisk_utils.py):**
+```bash
+# Сохранить длинный путь в переменную (избежать проблем с переносом строк при вставке):
+P="orbitaal_processed/stream_graph/2020-06-01__2020-08-31.parquet"
+# Нарезать нужный период и скачать:
+PYTHONPATH=. python scripts/slice_stream_graph.py --yadisk-path "$P" --start 2020-07-01 --end 2020-07-07 --output stream_graph/week.parquet
+```
+**Причина проблем:** `yadisk_utils.py` не имеет CLI (`if __name__ == "__main__"` отсутствует).
+Многострочные команды с `\` разбиваются терминалом при вставке — всегда использовать переменные
+для длинных путей и однострочные команды.
+
 Общее:
 - **Access:** SSH with key-based auth
 - **Python venv** is set up on the machine with all dependencies
