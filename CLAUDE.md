@@ -391,9 +391,45 @@ orbitaal_processed/stream_graph/
   2020-06-01__2020-08-31.json      # статистика (num_edges, num_nodes, etc.)
 ```
 
+### Static node features for stream graph
+
+`scripts/compute_stream_node_features.py` — вычисление 15 статических node features
+из train-части stream graph для двух конфигураций (10% и 25% рёбер).
+
+**15 фичей (float32):** log_in_degree, log_out_degree, in_out_ratio, log_unique_in/out_cp,
+log_total/avg_btc_in/out, recency, activity_span, log_event_rate, burstiness,
+out/in_counterparty_entropy.
+
+**Протокол:** фичи считаются ТОЛЬКО на train-части (первые 70% рёбер периода).
+Val (15%) и test (15%) НЕ участвуют — предотвращение data leakage.
+- features_10: train = первые 7% от полного stream graph (4.3M рёбер, 1.9M активных нод)
+- features_25: train = первые 17.5% от полного stream graph (10.8M рёбер, 4.3M активных нод)
+
+**Memory-efficient:** глобальное пространство индексов = 330M нод (весь ORBITAAL),
+но фичи хранятся только для активных нод (sparse формат с колонкой `node_idx`).
+Маппинг через `np.searchsorted` — 0 доп. памяти vs 37 GB для dense массива.
+
+**Хелпер для загрузки в модель:**
+```python
+from scripts.compute_stream_node_features import load_node_features
+# dense = load_node_features("features_10.parquet", num_nodes_in_period)
+# dense[node_idx] → float32[15], неактивные = 0
+```
+
+**Запуск:**
+```bash
+YADISK_TOKEN="..." PYTHONPATH=. python scripts/compute_stream_node_features.py \
+    --input /tmp/stream_graph_full.parquet \
+    --output-dir /tmp/stream_features/ --upload \
+    2>&1 | tee /tmp/stream_features.log
+```
+
+**Статус (2026-03-29):** Завершено. Результаты на Яндекс.Диске.
+features_10.parquet (60.5 MB), features_25.parquet (141.1 MB).
+
 ### Tests
 
-170 tests total — all passing:
+206 tests total — all passing:
 - `tests/test_pipeline.py` — 11 tests for the data pipeline
 - `tests/test_compute_features.py` — 36 tests for feature computation (correctness,
   disk cleanup, resume, edge cases)
@@ -405,6 +441,8 @@ orbitaal_processed/stream_graph/
   entity 0 removal, self-loops, timestamp sorting, node mapping, CSV/parquet formats)
 - `tests/test_temporal_sampler.py` — 30 tests for CUDA sampling module (Python/C++/CUDA
   backend equivalence, negative sampling, edge cases, cross-validation)
+- `tests/test_stream_node_features.py` — 36 tests for stream node features (shape, dtype,
+  finite, inactive nodes, hand-crafted per-feature checks, sparse format, load_node_features)
 
 ---
 
@@ -450,6 +488,7 @@ tests/
   test_baselines.py     # 35 tests for baseline pipeline
   test_models.py        # 42 tests for DL models and C++ extension
   test_stream_graph.py  # 16 tests for stream graph pipeline
+  test_stream_node_features.py  # 36 tests for stream node features
 data/
   samples/              # CSV samples for 2016-07-08 and 2016-07-09 (halving day)
   raw/                  # Raw ORBITAAL data (on dev machine only, gitignored)
@@ -605,6 +644,10 @@ orbitaal_processed/
   stream_graph/
     2020-06-01__2020-08-31.parquet             # stream graph (sorted by UNIX timestamp)
     2020-06-01__2020-08-31.json                # statistics
+    features_10.parquet                        # node features from train of first 10% edges (1.9M nodes, 60 MB)
+    features_10.json                           # metadata
+    features_25.parquet                        # node features from train of first 25% edges (4.3M nodes, 141 MB)
+    features_25.json                           # metadata
   experiments/                                 # Результаты экспериментов (создаётся launcher.py)
     exp_001_link_pred_baselines/
     exp_002_graph_level_baselines/
@@ -671,7 +714,7 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
 
 ---
 
-## Next steps (2026-03-27)
+## Next steps (2026-03-29)
 
 1. ~~Baselines~~ **Done** (33/35). ML бейзлайны — needs review.
 2. ~~GraphMixer~~ **Done**. Test MRR=0.430 (vs CN=0.732). Первый DL baseline.
@@ -685,5 +728,7 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
 9. **DyGFormer** — следующая основная DL-модель. Требует реализации с нуля под наш формат данных.
    CUDA-сэмплинг при K=512 даёт speedup в sampling, но transformer-forward доминирует → реальный
    прирост скромный. Тем не менее модель сильнее GLFormer (interaction-aware, K=512).
-10. Graph-level forecasting **deprioritized**.
-11. Pre-2010 period: filter to 2010+ or 2010-07-17+ (sparse/empty graphs before that).
+10. ~~Static node features for stream graph~~ **Done (2026-03-29).** 15 фичей, sparse формат,
+    features_10 (60 MB) + features_25 (141 MB) на Яндекс.Диске.
+11. Graph-level forecasting **deprioritized**.
+12. Pre-2010 period: filter to 2010+ or 2010-07-17+ (sparse/empty graphs before that).
