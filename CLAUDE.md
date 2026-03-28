@@ -292,8 +292,8 @@ temporal neighbor sampling. Три бэкенда: Python (NumPy), C++ (pybind11
 
 | Сценарий | Python | C++ | CUDA | Speedup vs Python |
 |----------|--------|-----|------|-------------------|
-| GraphMixer (B=512, K=20) | 23ms | 2.2ms | 0.2ms | 110x |
-| DyGFormer (B=2048, K=512) | 1740ms | 104ms | 1.0ms | 1689x |
+| часть от GraphMixer (B=512, K=20) | 23ms | 2.2ms | 0.2ms | 110x |
+| часть от DyGFormer (B=2048, K=512) | 1740ms | 104ms | 1.0ms | 1689x |
 
 **Setup на GPU машине:** `bash scripts/setup_v100.sh` — автоматическая настройка
 V100 (PyTorch 2.5.1+cu121, компиляция расширений, тесты).
@@ -315,12 +315,20 @@ loss, optimizer, протокол оценки — идентичны. Код tr
 - `src/models/GLFormer_cuda/glformer_evaluate.py` — `evaluate_tgb_style()` с CUDA сэмплингом
 - `src/models/GLFormer_cuda/glformer_launcher.py` — CLI launcher (`--sampling-backend`)
 
-**Сравнительный эксперимент (запланирован):**
-- `exps/exp_005_glformer_baseline/` — GLFormer с C++ сэмплингом, 10 эпох
-- `exps/exp_006_glformer_cuda/` — GLFormer с CUDA сэмплингом, 10 эпох
-- Данные: 1-неделя из stream graph (2020-07-01 — 2020-07-07)
-- Запуск: `bash scripts/run_cuda_comparison.sh` на V100
-- Цель: замерить speedup epoch_time, проверить совпадение метрик
+**Сравнительный эксперимент exp_005 vs exp_006 (2026-03-27, V100, 3 эпохи):**
+- Данные: 1 неделя (4.7M рёбер, 9.4M undirected), batch_size=4000, K=20
+- **Результат: CUDA speedup = 0%.** Epoch_time C++ ≈ CUDA ≈ 3.5 мин
+- Причина: при K=20, batch=4000 сэмплинг занимает <2% времени эпохи.
+  Bottleneck — GPU forward/backward pass. CUDA-сэмплинг помогает только когда
+  сэмплинг сам является узким местом (>20% epoch_time).
+- Яндекс.Диск: `exp_005_glformer/` оставить, `exp_006_glformer_cuda/` можно удалить.
+
+**Починки, сделанные в ходе экспериментов (2026-03-27):**
+- `log1p` нормализация BTC/USD в `src/models/EAGLE/data_utils.py` — фикс NaN loss от AMP float16 overflow
+- `torch.amp.autocast("cuda")` и `torch.amp.GradScaler("cuda", ...)` — фикс FutureWarning во всех 4 файлах
+- Validation/test sampler в GLFormer_cuda переведён на C++ backend (CUDA per-edge overhead = 5x slower)
+- `--max-test-edges` флаг добавлен в оба launcher'а и `run_cuda_comparison.sh`
+- Исправлен `YADISK_EXPERIMENTS_BASE` в `GLFormer/glformer_launcher.py` (был exp_006, стало exp_005)
 
 ### Stream graph pipeline
 
@@ -524,21 +532,28 @@ Branch naming: `feature/<name>`, `fix/<name>`, `experiment/<name>`
 
 ## Technical reference
 
-### Dev machine
+### Dev machines
 
-Первая машинка (8 cores / 64 GB / 200 GB SSD) уничтожена 2026-03-15.
-Рекомендуемый конфиг новой машинки: **16 cores / 64 GB RAM / 100 GB SSD**.
-- 16 cores: RF_N_JOBS=4 × 4 сессии = 16 cores (полная утилизация)
-- 64 GB RAM: запас на случай тяжёлых графов (sparse matrix ops на ~500K узлов)
-- 100 GB SSD: достаточно для кэша данных (~20 GB результатов)
+**CPU машина** (для data pipeline): первая (8 cores / 64 GB / 200 GB SSD) уничтожена 2026-03-15.
+Рекомендуемый конфиг: `cpu.4.8.120` (4 vCPU, 8 GB RAM, 120 GB SSD) — 2837 ₽/мес.
 
-- **Access:** SSH with key-based auth (`ssh -i <path_to_key> -l cursach <DEV_MACHINE_IP>`)
+**GPU машина** (для DL обучения): immers.cloud
+- **Конфиг:** V100-PCIE-32GB, 32GB RAM, 128GB SSD, Ubuntu 24.04 + CUDA 12.8
+- **ВАЖНО:** V100 = Volta (compute capability 7.0). Нужен **проприетарный** драйвер
+  (`nvidia-driver-570-server`), НЕ open (`nvidia-driver-570-open` несовместим с Volta).
+- **ВАЖНО:** 16GB RAM НЕ хватает для 4.7M рёбер с undirected=True (OOM при загрузке).
+  Минимум 32GB RAM.
+- **Setup:** `bash scripts/setup_v100.sh` — полная автоматическая настройка (драйвер,
+  venv, PyTorch 2.5.1+cu121, PyG, C++/CUDA extensions, тесты). Если драйвер требует
+  reboot — перезапустить скрипт после перезагрузки.
+- **PyTorch:** 2.5.1+cu121 (TORCH_CUDA_ARCH_LIST="7.0")
+- **Расширения:** temporal_sampling_cpp + temporal_sampling_cuda (30/30 тестов)
+
+Общее:
+- **Access:** SSH with key-based auth
 - **Python venv** is set up on the machine with all dependencies
-- **tmux** is used for long-running processes (pipeline steps take hours)
-- **No VPN** on the dev machine. Zenodo is accessible directly (~9 MB/s)
-
-The agent does not connect to the dev machine. If something needs to be run there,
-provide the user with commands to copy-paste.
+- **tmux** is used for long-running processes
+- The agent does not connect to the dev machine. Provide commands to copy-paste.
 
 ### Yandex.Disk API
 
@@ -641,12 +656,13 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
 2. ~~GraphMixer~~ **Done**. Test MRR=0.430 (vs CN=0.732). Первый DL baseline.
 3. ~~Stream-graph pipeline~~ **Done.** Результат на Яндекс.Диске.
 4. ~~CUDA temporal sampling module~~ **Done.** 30/30 тестов, бенчмарк 50-1700x speedup.
-5. ~~GLFormer_cuda pipeline~~ **Done.** `src/models/GLFormer_cuda/` — готов к запуску.
-6. **Следующий шаг:** Запустить exp_005 + exp_006 на V100 (`bash scripts/run_cuda_comparison.sh`).
-   Нарезать 1-неделю (`scripts/slice_stream_graph.py`), 10 эпох каждого, сравнить epoch_time.
-7. **DL models for temporal link prediction:**
-   - GLFormer — текущая модель (Adaptive Token Mixer + concatenation predictor).
-   - После эксперимента: обучить GLFormer на полном графе с CUDA сэмплингом.
-   - Target MRR: 0.6-0.7+ (matching/exceeding CN=0.73 on mature periods).
-8. Graph-level forecasting **deprioritized**.
-9. Pre-2010 period: filter to 2010+ or 2010-07-17+ (sparse/empty graphs before that).
+5. ~~GLFormer_cuda pipeline~~ **Done.** Код готов, эксперимент проведён.
+6. ~~GPU машина setup~~ **Done.** `scripts/setup_v100.sh` работает, все extensions собраны.
+7. ~~exp_005 / exp_006 GLFormer comparison~~ **Done (2026-03-27).** CUDA speedup = 0% при K=20 (ожидаемо).
+8. **GLFormer нормальное обучение** (задача коллеги). Нужно: batch_size=4000, K=20, 100 эпох,
+   patience=20, lr=0.0001, на 1-недельных данных (2020-07-01_2020-07-07). Ожидаемое время: ~6 часов.
+9. **DyGFormer** — следующая основная DL-модель. Требует реализации с нуля под наш формат данных.
+   CUDA-сэмплинг при K=512 даёт speedup в sampling, но transformer-forward доминирует → реальный
+   прирост скромный. Тем не менее модель сильнее GLFormer (interaction-aware, K=512).
+10. Graph-level forecasting **deprioritized**.
+11. Pre-2010 period: filter to 2010+ or 2010-07-17+ (sparse/empty graphs before that).

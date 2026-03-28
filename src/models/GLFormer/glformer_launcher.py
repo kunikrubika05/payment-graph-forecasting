@@ -35,7 +35,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-YADISK_EXPERIMENTS_BASE = "orbitaal_processed/experiments/exp_006_glformer"
+YADISK_EXPERIMENTS_BASE = "orbitaal_processed/experiments/exp_005_glformer"
 
 
 def _save_data_summary(output_dir, data, train_mask, val_mask, test_mask):

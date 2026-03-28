@@ -463,9 +463,9 @@ def train_glformer_cuda(
 
     logger.info("Building CUDA sampler (train edges)...")
     train_sampler = build_cuda_sampler(data, train_mask, backend=sampling_backend)
-    logger.info("Building CUDA sampler (train+val edges)...")
-    full_sampler = build_cuda_sampler(data, train_mask | val_mask, backend=sampling_backend)
-    logger.info("Sampling backend: %s", train_sampler.backend)
+    logger.info("Building C++ sampler (train+val edges, for validation)...")
+    full_sampler = build_cuda_sampler(data, train_mask | val_mask, backend="cpp")
+    logger.info("Train sampling backend: %s", train_sampler.backend)
 
     model = GLFormerTime(
         hidden_dim=hidden_dim,
