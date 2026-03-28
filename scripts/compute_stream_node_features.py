@@ -6,6 +6,9 @@ configurations: features_10 (first 10% of edges) and features_25 (first 25%).
 Features are computed ONLY on the train split (first 70% of the period) to
 avoid data leakage into val/test.
 
+Memory-efficient: only active nodes are stored. Global node indices (330M+)
+are preserved via the node_idx column for compatibility with models.
+
 Usage:
     YADISK_TOKEN="..." PYTHONPATH=. python scripts/compute_stream_node_features.py \
         --input /path/to/stream_graph.parquet \
@@ -54,66 +57,73 @@ def compute_node_features(
     ts: np.ndarray,
     btc: np.ndarray,
     num_nodes: int,
-) -> np.ndarray:
-    """Compute 15 node features from edge arrays.
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute 15 node features from edge arrays (sparse, active nodes only).
 
     Args:
-        src: Source node indices (int64).
-        dst: Destination node indices (int64).
+        src: Source node indices (int64, global).
+        dst: Destination node indices (int64, global).
         ts: Timestamps (int64, UNIX seconds).
         btc: Transaction values in BTC (float32).
-        num_nodes: Total number of nodes (features array size).
+        num_nodes: Total number of nodes in the full graph (for metadata only).
 
     Returns:
-        Float32 array of shape (num_nodes, 15).
+        Tuple of (active_global_indices int64, features float32) where
+        features.shape == (n_active, 15).
     """
+    active_set = np.unique(np.concatenate([src, dst]))
+    n_active = len(active_set)
+
+    src_local = np.searchsorted(active_set, src)
+    dst_local = np.searchsorted(active_set, dst)
+
     btc64 = btc.astype(np.float64)
-    features = np.zeros((num_nodes, 15), dtype=np.float64)
+    features = np.zeros((n_active, 15), dtype=np.float64)
 
     t0 = time.time()
-    _compute_degree_features(src, dst, num_nodes, features)
+    _compute_degree_features(src_local, dst_local, n_active, features)
     print(f"  - Degree features... done ({time.time() - t0:.1f}s)")
 
     t0 = time.time()
-    _compute_volume_features(src, dst, btc64, num_nodes, features)
+    _compute_volume_features(src_local, dst_local, btc64, n_active, features)
     print(f"  - Volume features... done ({time.time() - t0:.1f}s)")
 
     t0 = time.time()
-    _compute_temporal_features(src, dst, ts, num_nodes, features)
+    _compute_temporal_features(src_local, dst_local, ts, n_active, features)
     print(f"  - Temporal features... done ({time.time() - t0:.1f}s)")
 
     t0 = time.time()
-    _compute_entropy_features(src, dst, num_nodes, features)
+    _compute_entropy_features(src_local, dst_local, n_active, features)
     print(f"  - Entropy features... done ({time.time() - t0:.1f}s)")
 
     result = features.astype(np.float32)
     result[~np.isfinite(result)] = 0.0
-    return result
+    return active_set, result
 
 
 def _compute_degree_features(
-    src: np.ndarray, dst: np.ndarray, num_nodes: int, features: np.ndarray
+    src: np.ndarray, dst: np.ndarray, n_active: int, features: np.ndarray
 ):
     """Compute degree and counterparty features (columns 0-4)."""
-    out_deg = np.bincount(src, minlength=num_nodes).astype(np.float64)
-    in_deg = np.bincount(dst, minlength=num_nodes).astype(np.float64)
+    out_deg = np.bincount(src, minlength=n_active).astype(np.float64)
+    in_deg = np.bincount(dst, minlength=n_active).astype(np.float64)
 
     features[:, 0] = np.log1p(in_deg)
     features[:, 1] = np.log1p(out_deg)
 
     total_deg = in_deg + out_deg
-    ratio = np.full(num_nodes, 0.5, dtype=np.float64)
+    ratio = np.full(n_active, 0.5, dtype=np.float64)
     mask_active = total_deg > 0
     ratio[mask_active] = out_deg[mask_active] / total_deg[mask_active]
     features[:, 2] = ratio
 
     df_edges = pd.DataFrame({"src": src, "dst": dst})
     unique_out_cp = df_edges.groupby("src")["dst"].nunique()
-    arr_unique_out = np.zeros(num_nodes, dtype=np.float64)
+    arr_unique_out = np.zeros(n_active, dtype=np.float64)
     arr_unique_out[unique_out_cp.index.values] = unique_out_cp.values
 
     unique_in_cp = df_edges.groupby("dst")["src"].nunique()
-    arr_unique_in = np.zeros(num_nodes, dtype=np.float64)
+    arr_unique_in = np.zeros(n_active, dtype=np.float64)
     arr_unique_in[unique_in_cp.index.values] = unique_in_cp.values
 
     features[:, 3] = np.log1p(arr_unique_in)
@@ -121,24 +131,24 @@ def _compute_degree_features(
 
 
 def _compute_volume_features(
-    src: np.ndarray, dst: np.ndarray, btc: np.ndarray, num_nodes: int,
+    src: np.ndarray, dst: np.ndarray, btc: np.ndarray, n_active: int,
     features: np.ndarray,
 ):
     """Compute BTC volume features (columns 5-8)."""
-    total_in = np.zeros(num_nodes, dtype=np.float64)
+    total_in = np.zeros(n_active, dtype=np.float64)
     np.add.at(total_in, dst, btc)
 
-    total_out = np.zeros(num_nodes, dtype=np.float64)
+    total_out = np.zeros(n_active, dtype=np.float64)
     np.add.at(total_out, src, btc)
 
-    in_deg = np.bincount(dst, minlength=num_nodes).astype(np.float64)
-    out_deg = np.bincount(src, minlength=num_nodes).astype(np.float64)
+    in_deg = np.bincount(dst, minlength=n_active).astype(np.float64)
+    out_deg = np.bincount(src, minlength=n_active).astype(np.float64)
 
-    avg_in = np.zeros(num_nodes, dtype=np.float64)
+    avg_in = np.zeros(n_active, dtype=np.float64)
     mask_in = in_deg > 0
     avg_in[mask_in] = total_in[mask_in] / in_deg[mask_in]
 
-    avg_out = np.zeros(num_nodes, dtype=np.float64)
+    avg_out = np.zeros(n_active, dtype=np.float64)
     mask_out = out_deg > 0
     avg_out[mask_out] = total_out[mask_out] / out_deg[mask_out]
 
@@ -149,7 +159,7 @@ def _compute_volume_features(
 
 
 def _compute_temporal_features(
-    src: np.ndarray, dst: np.ndarray, ts: np.ndarray, num_nodes: int,
+    src: np.ndarray, dst: np.ndarray, ts: np.ndarray, n_active: int,
     features: np.ndarray,
 ):
     """Compute temporal pattern features (columns 9-12)."""
@@ -163,9 +173,9 @@ def _compute_temporal_features(
     events = pd.DataFrame({"node": nodes, "t": times})
     node_stats = events.groupby("node")["t"].agg(["min", "max", "count"])
 
-    t_last = np.full(num_nodes, np.nan, dtype=np.float64)
-    t_first = np.full(num_nodes, np.nan, dtype=np.float64)
-    n_events = np.zeros(num_nodes, dtype=np.float64)
+    t_last = np.full(n_active, t_min_global, dtype=np.float64)
+    t_first = np.full(n_active, t_split, dtype=np.float64)
+    n_events = np.zeros(n_active, dtype=np.float64)
 
     idx = node_stats.index.values
     t_last[idx] = node_stats["max"].values
@@ -173,16 +183,16 @@ def _compute_temporal_features(
     n_events[idx] = node_stats["count"].values
 
     active = n_events > 0
-    recency = np.ones(num_nodes, dtype=np.float64)
+    recency = np.ones(n_active, dtype=np.float64)
     recency[active] = (t_split - t_last[active]) / time_range
 
-    span_seconds = np.zeros(num_nodes, dtype=np.float64)
+    span_seconds = np.zeros(n_active, dtype=np.float64)
     span_seconds[active] = t_last[active] - t_first[active]
 
-    activity_span = np.zeros(num_nodes, dtype=np.float64)
+    activity_span = np.zeros(n_active, dtype=np.float64)
     activity_span[active] = span_seconds[active] / time_range
 
-    event_rate = np.zeros(num_nodes, dtype=np.float64)
+    event_rate = np.zeros(n_active, dtype=np.float64)
     mask_span = span_seconds > 0
     event_rate[mask_span] = n_events[mask_span] / span_seconds[mask_span]
 
@@ -195,7 +205,7 @@ def _compute_temporal_features(
     dt_valid = events.dropna(subset=["dt"])
     dt_stats = dt_valid.groupby("node")["dt"].agg(["mean", "std", "count"])
 
-    burstiness = np.zeros(num_nodes, dtype=np.float64)
+    burstiness = np.zeros(n_active, dtype=np.float64)
     valid = dt_stats[dt_stats["count"] >= 2]
     if len(valid) > 0:
         idx_v = valid.index.values
@@ -208,23 +218,23 @@ def _compute_temporal_features(
 
 
 def _compute_entropy_features(
-    src: np.ndarray, dst: np.ndarray, num_nodes: int, features: np.ndarray,
+    src: np.ndarray, dst: np.ndarray, n_active: int, features: np.ndarray,
 ):
     """Compute counterparty entropy features (columns 13-14)."""
     df = pd.DataFrame({"src": src, "dst": dst})
 
-    out_entropy = _normalized_entropy(df, group_col="src", value_col="dst", num_nodes=num_nodes)
-    in_entropy = _normalized_entropy(df, group_col="dst", value_col="src", num_nodes=num_nodes)
+    out_entropy = _normalized_entropy(df, group_col="src", value_col="dst", n_active=n_active)
+    in_entropy = _normalized_entropy(df, group_col="dst", value_col="src", n_active=n_active)
 
     features[:, 13] = out_entropy
     features[:, 14] = in_entropy
 
 
 def _normalized_entropy(
-    df: pd.DataFrame, group_col: str, value_col: str, num_nodes: int,
+    df: pd.DataFrame, group_col: str, value_col: str, n_active: int,
 ) -> np.ndarray:
     """Compute normalized entropy of value distribution per group."""
-    result = np.zeros(num_nodes, dtype=np.float64)
+    result = np.zeros(n_active, dtype=np.float64)
 
     counts = df.groupby([group_col, value_col]).size().reset_index(name="cnt")
     if len(counts) == 0:
@@ -259,7 +269,7 @@ def process_period(
     df_full: pd.DataFrame,
     fraction: float,
     train_ratio: float,
-    num_nodes: int,
+    num_nodes_global: int,
     output_dir: str,
     label: str,
 ) -> dict:
@@ -269,7 +279,7 @@ def process_period(
         df_full: Full stream graph DataFrame.
         fraction: Fraction of edges to use as period (e.g. 0.10).
         train_ratio: Fraction of period edges for training (e.g. 0.70).
-        num_nodes: Total number of nodes.
+        num_nodes_global: Total number of nodes in the full graph.
         output_dir: Directory to save results.
         label: Label for output files (e.g. "features_10").
 
@@ -292,16 +302,18 @@ def process_period(
     ts = train["timestamp"].values.astype(np.int64)
     btc = train["btc"].values.astype(np.float32)
 
-    feat = compute_node_features(src, dst, ts, btc, num_nodes)
+    active_nodes, feat = compute_node_features(src, dst, ts, btc, num_nodes_global)
+    n_active = len(active_nodes)
 
-    assert feat.shape == (num_nodes, 15), f"Shape mismatch: {feat.shape}"
+    assert feat.shape == (n_active, 15), f"Shape mismatch: {feat.shape}"
     assert np.isfinite(feat).all(), "Non-finite values in features"
-
-    n_active = int((feat.sum(axis=1) != 0).sum())
     print(f"  - Validation: all finite, shape {feat.shape}, active nodes: {n_active:,} ✓")
 
     feat_df = pd.DataFrame(feat, columns=FEATURE_COLUMNS)
-    feat_df = feat_df.astype(np.float32)
+    feat_df.insert(0, "node_idx", active_nodes)
+    feat_df["node_idx"] = feat_df["node_idx"].astype(np.int64)
+    for col in FEATURE_COLUMNS:
+        feat_df[col] = feat_df[col].astype(np.float32)
 
     parquet_path = os.path.join(output_dir, f"{label}.parquet")
     feat_df.to_parquet(parquet_path, index=False)
@@ -313,12 +325,13 @@ def process_period(
         "train_ratio": train_ratio,
         "num_edges_period": n_period,
         "num_edges_train": n_train,
-        "num_nodes_total": num_nodes,
+        "num_nodes_global": num_nodes_global,
         "num_nodes_active_in_train": n_active,
         "train_timestamp_min": int(ts.min()) if n_train > 0 else 0,
         "train_timestamp_max": int(ts.max()) if n_train > 0 else 0,
         "feature_columns": FEATURE_COLUMNS,
         "source_file": "2020-06-01__2020-08-31.parquet",
+        "format": "sparse (only active nodes, lookup by node_idx column)",
     }
 
     json_path = os.path.join(output_dir, f"{label}.json")
@@ -327,6 +340,25 @@ def process_period(
     print(f"  Saved {json_path}")
 
     return metadata
+
+
+def load_node_features(parquet_path: str, num_nodes: int) -> np.ndarray:
+    """Load sparse node features into a dense array for model use.
+
+    Args:
+        parquet_path: Path to features parquet file.
+        num_nodes: Number of nodes to allocate (max_node_idx + 1).
+
+    Returns:
+        Float32 array of shape (num_nodes, 15). Inactive nodes get zeros
+        (except in_out_ratio=0.5 and recency=1.0 by convention, but those
+        are only set for active nodes in this version).
+    """
+    df = pd.read_parquet(parquet_path)
+    features = np.zeros((num_nodes, 15), dtype=np.float32)
+    idx = df["node_idx"].values.astype(np.int64)
+    features[idx] = df[FEATURE_COLUMNS].values.astype(np.float32)
+    return features
 
 
 def main():
@@ -361,18 +393,18 @@ def main():
         print(f"[1/6] Loading stream graph...")
 
     df = pd.read_parquet(args.input)
-    num_nodes = int(max(df["src_idx"].max(), df["dst_idx"].max()) + 1)
-    print(f"  {len(df):,} edges, {num_nodes:,} nodes")
+    num_nodes_global = int(max(df["src_idx"].max(), df["dst_idx"].max()) + 1)
+    print(f"  {len(df):,} edges, {num_nodes_global:,} nodes (global index space)")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
     print(f"[2/6] Computing features_10...")
-    process_period(df, 0.10, 0.70, num_nodes, args.output_dir, "features_10")
+    process_period(df, 0.10, 0.70, num_nodes_global, args.output_dir, "features_10")
 
     print(f"[3/6] Saving features_10 — done (saved inside process_period)")
 
     print(f"[4/6] Computing features_25...")
-    process_period(df, 0.25, 0.70, num_nodes, args.output_dir, "features_25")
+    process_period(df, 0.25, 0.70, num_nodes_global, args.output_dir, "features_25")
 
     print(f"[5/6] Saving features_25 — done (saved inside process_period)")
 
