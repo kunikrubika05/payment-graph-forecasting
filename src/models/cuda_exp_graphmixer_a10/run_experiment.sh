@@ -17,19 +17,23 @@
 
 set -uo pipefail
 
-PARQUET_PATH="stream_graph/2020-06-01_2020-08-31.parquet"
+PARQUET_PATH="stream_graph/week.parquet"
 EPOCHS=3
 BATCH_SIZE=2000
+NUM_NEIGHBORS=20
 MAX_VAL_EDGES=5000
 OUTPUT="/tmp/cuda_exp_a10"
 LOG="/tmp/cuda_exp_a10.log"
+BACKENDS="python cpp cuda"
 
 for arg in "$@"; do
   case $arg in
-    --parquet-path=*) PARQUET_PATH="${arg#*=}" ;;
-    --epochs=*)       EPOCHS="${arg#*=}" ;;
-    --batch-size=*)   BATCH_SIZE="${arg#*=}" ;;
-    --output=*)       OUTPUT="${arg#*=}" ;;
+    --parquet-path=*)   PARQUET_PATH="${arg#*=}" ;;
+    --epochs=*)         EPOCHS="${arg#*=}" ;;
+    --batch-size=*)     BATCH_SIZE="${arg#*=}" ;;
+    --num-neighbors=*)  NUM_NEIGHBORS="${arg#*=}" ;;
+    --output=*)         OUTPUT="${arg#*=}" ;;
+    --backends=*)       BACKENDS="${arg#*=}" ;;
   esac
 done
 
@@ -57,6 +61,7 @@ run_backend() {
         --sampling-backend "$backend" \
         --epochs        "$EPOCHS" \
         --batch-size    "$BATCH_SIZE" \
+        --num-neighbors "$NUM_NEIGHBORS" \
         --max-val-edges "$MAX_VAL_EDGES" \
         --output        "$OUTPUT" \
         2>&1
@@ -65,9 +70,9 @@ run_backend() {
 }
 
 {
-    run_backend python
-    run_backend cpp
-    run_backend cuda
+    for backend in $BACKENDS; do
+        run_backend "$backend"
+    done
 
     echo "========================================"
     echo "ALL BACKENDS COMPLETE"
@@ -78,7 +83,7 @@ run_backend() {
     printf "%-8s %10s %14s %12s %12s %10s\n" \
         "-------" "--------" "-----------" "-----" "------" "-------"
 
-    for backend in python cpp cuda; do
+    for backend in $BACKENDS; do
         stem=$(basename "${PARQUET_PATH%.parquet}")
         result_dir="$OUTPUT/graphmixer_${backend}_${stem}"
         if [ -f "$result_dir/final_results.json" ]; then
@@ -99,8 +104,9 @@ print(f\"{r['sampling_backend']:<8} {t['avg_epoch_sec']:>10.0f} {t['avg_sampling
     python3 -c "
 import json, os
 stem = os.path.basename('${PARQUET_PATH}'.replace('.parquet',''))
+backends = '${BACKENDS}'.split()
 results = {}
-for b in ['python','cpp','cuda']:
+for b in backends:
     path = f'${OUTPUT}/graphmixer_{b}_{stem}/final_results.json'
     if os.path.exists(path):
         with open(path) as f:
