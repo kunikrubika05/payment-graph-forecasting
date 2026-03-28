@@ -153,7 +153,7 @@ def run_experiment(args):
     eval_start = time.time()
     all_before_test = train_mask | val_mask
     test_sampler = build_cuda_sampler(
-        data, all_before_test, backend=args.sampling_backend
+        data, all_before_test, backend="cpp"
     )
 
     test_metrics = evaluate_tgb_style(
