@@ -167,8 +167,8 @@ Pair features используют float32 для экономии памяти 
 **Запуск на дев-машине:**
 ```bash
 cd ~/payment-graph-forecasting && git pull
-source venv/bin/activate && pip install -r requirements.txt
-PYTHONPATH=. python -m pytest tests/test_baselines.py -v
+source venv/bin/activate && pip install -e ".[baselines,dev]"
+pytest tests/test_baselines.py -v
 export YADISK_TOKEN="..."
 export RF_N_JOBS=4          # RF параллелизм (cores / sessions)
 export CATBOOST_THREADS=4   # CatBoost параллелизм
@@ -360,7 +360,7 @@ cd ~ && git clone https://github.com/kunikrubika05/payment-graph-forecasting.git
 cd payment-graph-forecasting
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[all]"
 
 # 3. Запуск в tmux
 tmux new -s stream
@@ -502,7 +502,7 @@ Branch naming: `feature/<name>`, `fix/<name>`, `experiment/<name>`
 
 - **Write tests** for any new functionality. Place them in `tests/`.
 - Run `pytest tests/ -v` before proposing changes as ready.
-- **Always activate venv** before running any Python commands: `source venv/bin/activate && PYTHONPATH=. <command>`. Do NOT use system Python or pip.
+- **Always activate venv** before running any Python commands: `source venv/bin/activate && <command>`. Do NOT use system Python or pip. After `pip install -e .` the `src` package is importable without `PYTHONPATH=.`.
 - **Write docstrings** for all public functions, classes, and modules (Google style).
 - **Do NOT write inline comments.** Code should be self-explanatory. Docstrings only.
 - Maintain documentation in `docs/` as the project grows (see `docs/README.md`).

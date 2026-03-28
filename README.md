@@ -95,12 +95,49 @@ week_end = pd.Timestamp("2020-07-07 23:59:59").timestamp()
 week_df = df[(df["timestamp"] >= week_start) & (df["timestamp"] <= week_end)]
 ```
 
+## Installation
+
+The project uses `pyproject.toml` with optional dependency groups. Install only what you need:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip setuptools wheel
+
+# Core only (data pipeline, feature computation)
+pip install -e .
+
+# Core + ML baselines (scikit-learn, catboost, statsmodels, prophet)
+pip install -e ".[baselines]"
+
+# Core + deep learning (torch, ninja)
+pip install -e ".[dl]"
+
+# Core + hyperparameter optimization (optuna)
+pip install -e ".[hpo]"
+
+# Core + visualization (matplotlib, networkx)
+pip install -e ".[viz]"
+
+# Core + testing (pytest)
+pip install -e ".[dev]"
+
+# Everything
+pip install -e ".[all]"
+
+# Combine groups as needed
+pip install -e ".[dl,hpo,dev]"
+```
+
+**PyTorch with CUDA:** on GPU machines, install torch first with the correct CUDA version:
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+pip install -e ".[dl,hpo,dev]"
+```
+
 ## Pipeline usage
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
 # Test on CSV samples (locally)
 python src/build_pipeline.py --steps mapping snapshots \
     --input-dir data/samples --format csv
