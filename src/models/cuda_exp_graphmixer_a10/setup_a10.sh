@@ -53,7 +53,7 @@ pip install --upgrade pip -q
 # ── 4. PyTorch 2.5.1 + CUDA 12.1 ──────────────────────────────────────────────
 echo "[4/6] Installing PyTorch 2.5.1+cu121..."
 pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121 -q
-pip install optuna -q
+pip install torch_geometric optuna -q
 
 echo "    Verifying PyTorch CUDA..."
 python -c "
