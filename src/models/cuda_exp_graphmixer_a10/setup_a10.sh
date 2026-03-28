@@ -19,22 +19,23 @@ set -uo pipefail
 echo "=== A10 Setup: $(date) ==="
 
 # ── 1. NVIDIA driver ───────────────────────────────────────────────────────────
-echo "[1/6] Installing NVIDIA driver 550 (proprietary)..."
-sudo apt-get update -qq
-sudo apt-get install -y linux-headers-$(uname -r)
-sudo apt-get install -y nvidia-driver-550 2>/dev/null || \
+echo "[1/6] Checking NVIDIA driver..."
+if nvidia-smi &>/dev/null; then
+    echo "    Driver already working, skipping install."
+else
+    echo "    Driver not found, installing nvidia-driver-550-server..."
+    sudo apt-get update -qq
+    sudo apt-get install -y linux-headers-$(uname -r)
     sudo apt-get install -y nvidia-driver-550-server
 
-echo "    Rebooting in 5 sec to load driver... (re-run script after reboot)"
-echo "    If driver already loaded, press Ctrl+C within 5 sec to skip reboot."
-sleep 5 && sudo reboot &
-wait
-# If we reach here, reboot was skipped
-echo "    Skipped reboot (driver already loaded)"
+    echo "    Rebooting to load driver — re-run script after reboot."
+    sudo reboot
+    exit 0
+fi
 
 # ── 2. Verify driver + CUDA ────────────────────────────────────────────────────
 echo "[2/6] Verifying driver..."
-nvidia-smi || { echo "ERROR: nvidia-smi failed. Reboot and re-run script."; exit 1; }
+nvidia-smi || { echo "ERROR: nvidia-smi failed."; exit 1; }
 echo "    nvcc version:"
 nvcc --version 2>/dev/null || echo "    (nvcc not found, will use PyTorch-bundled CUDA)"
 
