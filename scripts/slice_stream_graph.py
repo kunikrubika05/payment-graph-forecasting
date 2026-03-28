@@ -33,10 +33,12 @@ def main():
                         help="Local path to input parquet")
     parser.add_argument("--yadisk-path", type=str, default=None,
                         help="Yandex.Disk path to download from")
-    parser.add_argument("--start", type=str, required=True,
+    parser.add_argument("--start", type=str, default=None,
                         help="Start date inclusive (YYYY-MM-DD)")
-    parser.add_argument("--end", type=str, required=True,
+    parser.add_argument("--end", type=str, default=None,
                         help="End date inclusive (YYYY-MM-DD)")
+    parser.add_argument("--fraction", type=float, default=None,
+                        help="Take first N fraction of edges (e.g. 0.1 for 10%%)")
     parser.add_argument("--output", type=str, required=True,
                         help="Output parquet path")
     args = parser.parse_args()
@@ -58,16 +60,24 @@ def main():
         download_file(args.yadisk_path, input_path, token)
         print("Done.")
 
+    if args.fraction is None and (args.start is None or args.end is None):
+        print("ERROR: specify --start/--end or --fraction")
+        sys.exit(1)
+
     print(f"Reading {input_path}...")
     df = pd.read_parquet(input_path)
     print(f"  Total: {len(df):,} edges, columns: {list(df.columns)}")
 
-    ts_start = unix_ts(args.start)
-    ts_end = unix_ts(args.end) + 86400 - 1
-
-    mask = (df["timestamp"] >= ts_start) & (df["timestamp"] <= ts_end)
-    df_slice = df[mask].copy()
-    print(f"  After filter [{args.start}, {args.end}]: {len(df_slice):,} edges")
+    if args.fraction is not None:
+        n = int(len(df) * args.fraction)
+        df_slice = df.iloc[:n].copy()
+        print(f"  After fraction {args.fraction} (first {n:,} edges): {len(df_slice):,} edges")
+    else:
+        ts_start = unix_ts(args.start)
+        ts_end = unix_ts(args.end) + 86400 - 1
+        mask = (df["timestamp"] >= ts_start) & (df["timestamp"] <= ts_end)
+        df_slice = df[mask].copy()
+        print(f"  After filter [{args.start}, {args.end}]: {len(df_slice):,} edges")
 
     unique_nodes = set(df_slice["src_idx"].unique()) | set(df_slice["dst_idx"].unique())
     print(f"  Unique nodes: {len(unique_nodes):,}")
@@ -78,8 +88,8 @@ def main():
     print(f"  Saved: {args.output} ({size_mb:.1f} MB)")
 
     stats = {
-        "start_date": args.start,
-        "end_date": args.end,
+        "start_date": args.start or "fraction",
+        "end_date": args.end or str(args.fraction),
         "num_edges": len(df_slice),
         "num_nodes": len(unique_nodes),
         "ts_min": int(df_slice["timestamp"].min()),
