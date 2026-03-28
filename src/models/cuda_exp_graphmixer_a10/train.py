@@ -53,14 +53,21 @@ def build_sampler(
         Initialised TemporalGraphSampler.
     """
     edge_ids = np.where(mask)[0].astype(np.int64)
+    n_edges = int(mask.sum())
+    edge_feats = (
+        data.edge_feats[mask].astype(np.float32)
+        if data.edge_feats is not None
+        else np.zeros((n_edges, 0), dtype=np.float32)
+    )
+    node_feats = np.zeros((data.num_nodes, 0), dtype=np.float32)
     return TemporalGraphSampler(
         num_nodes=data.num_nodes,
         src=data.src[mask].astype(np.int32),
         dst=data.dst[mask].astype(np.int32),
         timestamps=data.timestamps[mask].astype(np.float64),
         edge_ids=edge_ids,
-        node_feats=None,
-        edge_feats=data.edge_feats[mask].astype(np.float32) if data.edge_feats is not None else None,
+        node_feats=node_feats,
+        edge_feats=edge_feats,
         backend=backend,
     )
 
