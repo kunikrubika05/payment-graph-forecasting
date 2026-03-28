@@ -143,6 +143,7 @@ def run_experiment(args: argparse.Namespace) -> None:
         use_amp=not args.no_amp,
         edge_feat_dim=args.edge_feat_dim,
         node_feat_dim=0,
+        test_mask=test_mask,
     )
 
     _save_curves(output_dir, history)
@@ -152,6 +153,7 @@ def run_experiment(args: argparse.Namespace) -> None:
     avg_f = float(np.mean(history["forward_time_sec"]))
     avg_e = float(np.mean(history["epoch_time_sec"]))
 
+    test_m = history.get("test_metrics", {})
     final = {
         "experiment": exp_name,
         "sampling_backend": args.sampling_backend,
@@ -159,6 +161,10 @@ def run_experiment(args: argparse.Namespace) -> None:
         "model": "GraphMixerTime",
         "best_val_mrr": float(max(history["val_mrr"])) if history["val_mrr"] else None,
         "best_epoch": int(np.argmax(history["val_mrr"]) + 1) if history["val_mrr"] else None,
+        "test_mrr": float(test_m["mrr"]) if test_m else None,
+        "test_hits@1": float(test_m.get("hits@1", 0)) if test_m else None,
+        "test_hits@3": float(test_m.get("hits@3", 0)) if test_m else None,
+        "test_hits@10": float(test_m.get("hits@10", 0)) if test_m else None,
         "total_epochs": len(history["train_loss"]),
         "timing": {
             "avg_epoch_sec": avg_e,
@@ -184,6 +190,10 @@ def run_experiment(args: argparse.Namespace) -> None:
                 t["avg_forward_sec"], 100 - t["sampling_fraction_pct"])
     logger.info("  Best val MRR:   %.4f (epoch %d)",
                 final["best_val_mrr"] or 0.0, final["best_epoch"] or 0)
+    if final["test_mrr"] is not None:
+        logger.info("  Test MRR:       %.4f  Hits@1=%.4f  Hits@3=%.4f  Hits@10=%.4f",
+                    final["test_mrr"], final["test_hits@1"],
+                    final["test_hits@3"], final["test_hits@10"])
     logger.info("  Total time:     %.1f min", total_time / 60)
     logger.info("=" * 60)
 

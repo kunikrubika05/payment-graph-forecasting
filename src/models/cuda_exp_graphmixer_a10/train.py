@@ -315,6 +315,7 @@ def train_graphmixer(
     use_amp: bool = True,
     edge_feat_dim: int = 2,
     node_feat_dim: int = 0,
+    test_mask: Optional[np.ndarray] = None,
 ) -> Tuple[GraphMixerTime, Dict]:
     """Train GraphMixerTime with a chosen backend, tracking timing per epoch.
 
@@ -339,6 +340,8 @@ def train_graphmixer(
         use_amp: Use AMP mixed precision.
         edge_feat_dim: Edge feature dimension (2 = log1p btc+usd).
         node_feat_dim: Node feature dimension (0 = disabled).
+        test_mask: Optional boolean mask for test edges. If provided,
+            evaluates the best model on test set after training.
 
     Returns:
         (best model, history dict with per-epoch timing breakdown).
@@ -491,4 +494,30 @@ def train_graphmixer(
         avg_s, summary["sampling_fraction_pct"], avg_f,
         best_val_mrr,
     )
+
+    if test_mask is not None and test_mask.sum() > 0:
+        logger.info("Evaluating on test set (full evaluation, no subsampling)...")
+        all_mask = train_mask | val_mask | test_mask
+        test_sampler = build_sampler(data, all_mask, backend="cpp")
+        test_indices = np.where(test_mask)[0]
+        test_metrics = validate(
+            model, data, test_sampler, test_indices,
+            device, num_neighbors,
+            max_edges=len(test_indices),
+            amp_enabled=amp_enabled,
+            rng=np.random.default_rng(seed),
+        )
+        logger.info(
+            "TEST RESULTS | MRR=%.4f  Hits@1=%.4f  Hits@3=%.4f  Hits@10=%.4f",
+            test_metrics["mrr"], test_metrics["hits@1"],
+            test_metrics["hits@3"], test_metrics["hits@10"],
+        )
+        summary["test_mrr"] = test_metrics["mrr"]
+        summary["test_hits@1"] = test_metrics["hits@1"]
+        summary["test_hits@3"] = test_metrics["hits@3"]
+        summary["test_hits@10"] = test_metrics["hits@10"]
+        with open(os.path.join(output_dir, "summary.json"), "w") as f:
+            json.dump(summary, f, indent=2)
+        history["test_metrics"] = test_metrics
+
     return model, history
