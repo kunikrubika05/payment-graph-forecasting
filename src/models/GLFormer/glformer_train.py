@@ -217,7 +217,7 @@ def train_epoch(
     device: torch.device,
     batch_size: int = 200,
     num_neighbors: int = 20,
-    neg_per_positive: int = 1,
+    neg_per_positive: int = 5,
     use_amp: bool = True,
     scaler: Optional[torch.cuda.amp.GradScaler] = None,
     rng: Optional[np.random.Generator] = None,
