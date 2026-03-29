@@ -1,13 +1,9 @@
 """Main entry point for stream graph baseline experiments.
 
 Usage:
-    YADISK_TOKEN="..." PYTHONPATH=. python sg_baselines/run.py \
-        --period period_10 --output /tmp/sg_baselines_results \
-        --upload 2>&1 | tee /tmp/sg_baselines.log
-
-    YADISK_TOKEN="..." PYTHONPATH=. python sg_baselines/run.py \
-        --period all --output /tmp/sg_baselines_results \
-        --upload 2>&1 | tee /tmp/sg_baselines.log
+    YADISK_TOKEN="..." PYTHONPATH=. python -u sg_baselines/run.py \
+        --period period_10 --output /tmp/sg_baselines_results --upload \
+        2>&1 | tee /tmp/sg_baselines.log
 """
 
 import argparse
@@ -43,17 +39,15 @@ def run_experiment(config: ExperimentConfig, token: str):
 
     summary_path = os.path.join(exp_dir, "summary.json")
     if os.path.exists(summary_path):
-        print(f"\n{'='*60}")
-        print(f"SKIP {exp_name}: summary.json already exists (resume mode)")
-        print(f"{'='*60}")
+        print(f"\nSKIP {exp_name}: summary.json already exists (resume mode)", flush=True)
         return
 
-    print(f"\n{'='*60}")
-    print(f"EXPERIMENT: {exp_name}")
-    print(f"Period: {config.period_name} (fraction={config.fraction})")
+    print(f"\n{'='*60}", flush=True)
+    print(f"EXPERIMENT: {exp_name}", flush=True)
+    print(f"Period: {config.period_name} (fraction={config.fraction})", flush=True)
     print(f"Split: train={config.train_ratio}, val={config.val_ratio}, "
-          f"test={config.test_ratio:.2f}")
-    print(f"{'='*60}")
+          f"test={config.test_ratio:.2f}", flush=True)
+    print(f"{'='*60}", flush=True)
 
     t_start = time.time()
 
@@ -61,11 +55,12 @@ def run_experiment(config: ExperimentConfig, token: str):
     with open(config_path, "w") as f:
         json.dump(config.to_dict(), f, indent=2)
 
-    print("\n[1/6] Loading data...")
+    print("\n[1/6] Loading data...", flush=True)
     df = load_stream_graph(config, token)
     train_edges, val_edges, test_edges = split_stream_graph(df, config)
+    del df
 
-    print("\n[2/6] Loading features and adjacency...")
+    print("\n[2/6] Loading features and adjacency...", flush=True)
     node_idx, features_df = load_node_features_sparse(config, token)
     node_features = features_df.values.astype(np.float32)
     node_mapping, adj_directed, adj_undirected = load_adjacency(config, token)
@@ -75,97 +70,108 @@ def run_experiment(config: ExperimentConfig, token: str):
     )
     active_nodes = node_mapping
 
-    print("\n[3/6] Building train neighbor sets...")
+    print("\n[3/6] Building train neighbor sets...", flush=True)
     t0 = time.time()
     train_neighbors = build_train_neighbor_sets(train_edges)
-    print(f"  Built neighbor sets for {len(train_neighbors):,} sources ({time.time() - t0:.1f}s)")
+    print(f"  Built neighbor sets for {len(train_neighbors):,} sources "
+          f"({time.time() - t0:.1f}s)", flush=True)
 
     all_results = {"config": config.to_dict(), "heuristics": {}, "ml": {}}
 
-    print("\n[4/6] Heuristic baselines...")
-    for split_name, edges in [("val", val_edges), ("test", test_edges)]:
-        heur_results = evaluate_heuristics(
-            edges, train_neighbors, active_nodes,
-            node_mapping, adj_undirected,
-            config.heuristics, config.n_negatives,
-            seed=config.random_seed + (10 if split_name == "val" else 20),
-            split_name=split_name,
-        )
-        for heur_name, metrics in heur_results.items():
-            all_results["heuristics"].setdefault(heur_name, {})[split_name] = metrics
+    if config.heuristics:
+        print("\n[4/6] Heuristic baselines...", flush=True)
+        for split_name, edges in [("val", val_edges), ("test", test_edges)]:
+            heur_results = evaluate_heuristics(
+                edges, train_neighbors, active_nodes,
+                node_mapping, adj_undirected,
+                config.heuristics, config.n_negatives,
+                seed=config.random_seed + (10 if split_name == "val" else 20),
+                split_name=split_name,
+                max_queries=50_000,
+            )
+            for heur_name, metrics in heur_results.items():
+                all_results["heuristics"].setdefault(heur_name, {})[split_name] = metrics
+    else:
+        print("\n[4/6] Skipping heuristics", flush=True)
 
-    print("\n[5/6] ML baselines...")
-    print("  Preparing training data...")
-    X_train, y_train = prepare_training_data(
-        train_edges, node_idx, node_features,
-        node_mapping, adj_directed, adj_undirected,
-        train_neighbors, active_nodes, config,
-    )
-
-    for model_name in config.models:
-        print(f"\n  --- {model_name} ---")
-        best_params, hp_results = hp_search(
-            model_name, X_train, y_train, val_edges,
-            node_idx, node_features,
+    if config.models:
+        print("\n[5/6] ML baselines...", flush=True)
+        print("  Preparing training data...", flush=True)
+        X_train, y_train = prepare_training_data(
+            train_edges, node_idx, node_features,
             node_mapping, adj_directed, adj_undirected,
             train_neighbors, active_nodes, config,
         )
 
-        hp_path = os.path.join(exp_dir, f"hp_search_{model_name}.json")
-        with open(hp_path, "w") as f:
-            json.dump(hp_results, f, indent=2)
+        for model_name in config.models:
+            print(f"\n  --- {model_name} ---", flush=True)
+            best_params, hp_results = hp_search(
+                model_name, X_train, y_train, val_edges,
+                node_idx, node_features,
+                node_mapping, adj_directed, adj_undirected,
+                train_neighbors, active_nodes, config,
+            )
 
-        eval_results = train_and_evaluate(
-            model_name, best_params,
-            X_train, y_train, val_edges, test_edges,
-            node_idx, node_features,
-            node_mapping, adj_directed, adj_undirected,
-            train_neighbors, active_nodes, config,
-        )
+            hp_path = os.path.join(exp_dir, f"hp_search_{model_name}.json")
+            with open(hp_path, "w") as f:
+                json.dump(hp_results, f, indent=2)
 
-        all_results["ml"][model_name] = {
-            "best_params": best_params,
-            "val": eval_results["val"],
-            "test": eval_results["test"],
-        }
+            eval_results = train_and_evaluate(
+                model_name, best_params,
+                X_train, y_train, val_edges, test_edges,
+                node_idx, node_features,
+                node_mapping, adj_directed, adj_undirected,
+                train_neighbors, active_nodes, config,
+            )
+
+            all_results["ml"][model_name] = {
+                "best_params": best_params,
+                "val": eval_results["val"],
+                "test": eval_results["test"],
+            }
+    else:
+        print("\n[5/6] Skipping ML baselines", flush=True)
 
     elapsed = time.time() - t_start
     all_results["elapsed_seconds"] = elapsed
-    print(f"\n[6/6] Saving results...")
 
+    print(f"\n[6/6] Saving results...", flush=True)
     with open(summary_path, "w") as f:
         json.dump(all_results, f, indent=2)
-    print(f"  Saved {summary_path}")
+    print(f"  Saved {summary_path}", flush=True)
 
     _print_summary_table(all_results)
 
     if config.upload:
         _upload_results(exp_dir, exp_name, token)
 
-    print(f"\n  Total time: {elapsed / 60:.1f} min")
+    print(f"\n  Total time: {elapsed / 60:.1f} min", flush=True)
 
 
 def _print_summary_table(results: dict):
     """Print a summary table of all results."""
-    print(f"\n{'='*70}")
-    print(f"{'Method':<15} {'Val MRR':>10} {'Test MRR':>10} {'Test H@1':>10} {'Test H@10':>10}")
-    print(f"{'-'*70}")
+    print(f"\n{'='*70}", flush=True)
+    print(f"{'Method':<15} {'Val MRR':>10} {'Test MRR':>10} "
+          f"{'Test H@1':>10} {'Test H@10':>10}", flush=True)
+    print(f"{'-'*70}", flush=True)
 
     for heur_name, splits in results.get("heuristics", {}).items():
         val_mrr = splits.get("val", {}).get("mrr", float("nan"))
         test_mrr = splits.get("test", {}).get("mrr", float("nan"))
         test_h1 = splits.get("test", {}).get("hits@1", float("nan"))
         test_h10 = splits.get("test", {}).get("hits@10", float("nan"))
-        print(f"{heur_name:<15} {val_mrr:>10.4f} {test_mrr:>10.4f} {test_h1:>10.4f} {test_h10:>10.4f}")
+        print(f"{heur_name:<15} {val_mrr:>10.4f} {test_mrr:>10.4f} "
+              f"{test_h1:>10.4f} {test_h10:>10.4f}", flush=True)
 
     for model_name, data in results.get("ml", {}).items():
         val_mrr = data.get("val", {}).get("mrr", float("nan"))
         test_mrr = data.get("test", {}).get("mrr", float("nan"))
         test_h1 = data.get("test", {}).get("hits@1", float("nan"))
         test_h10 = data.get("test", {}).get("hits@10", float("nan"))
-        print(f"{model_name:<15} {val_mrr:>10.4f} {test_mrr:>10.4f} {test_h1:>10.4f} {test_h10:>10.4f}")
+        print(f"{model_name:<15} {val_mrr:>10.4f} {test_mrr:>10.4f} "
+              f"{test_h1:>10.4f} {test_h10:>10.4f}", flush=True)
 
-    print(f"{'='*70}")
+    print(f"{'='*70}", flush=True)
 
 
 def _upload_results(exp_dir: str, exp_name: str, token: str):
@@ -173,10 +179,10 @@ def _upload_results(exp_dir: str, exp_name: str, token: str):
     from src.yadisk_utils import upload_directory, create_remote_folder_recursive
 
     remote_dir = f"{YADISK_EXPERIMENTS_BASE}/{exp_name}"
-    print(f"  Uploading to {remote_dir}...")
+    print(f"  Uploading to {remote_dir}...", flush=True)
     create_remote_folder_recursive(remote_dir, token)
     n = upload_directory(exp_dir, remote_dir, token)
-    print(f"  Uploaded {n} files")
+    print(f"  Uploaded {n} files", flush=True)
 
 
 def main():
@@ -216,7 +222,7 @@ def main():
 
     token = os.environ.get("YADISK_TOKEN", "")
     if not token:
-        print("ERROR: YADISK_TOKEN environment variable required")
+        print("ERROR: YADISK_TOKEN environment variable required", flush=True)
         sys.exit(1)
 
     configs = get_experiment_configs()
@@ -241,15 +247,16 @@ def main():
         try:
             run_experiment(config, token)
         except Exception as e:
+            import traceback
             error_msg = f"ERROR in {config.period_name}: {e}"
-            print(error_msg)
+            print(error_msg, flush=True)
+            traceback.print_exc()
             error_path = os.path.join(args.output, f"exp_sg_{config.label}", "error.txt")
             os.makedirs(os.path.dirname(error_path), exist_ok=True)
             with open(error_path, "w") as f:
-                import traceback
                 f.write(traceback.format_exc())
 
-    print("\nAll experiments done.")
+    print("\nAll experiments done.", flush=True)
 
 
 if __name__ == "__main__":
