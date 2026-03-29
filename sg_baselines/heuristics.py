@@ -154,10 +154,19 @@ def evaluate_heuristics(
 
         scores = np.zeros(total_pairs, dtype=np.float32)
         if valid_mask.any():
-            valid_scores = _score_batch(
-                heuristic, adj_undirected,
-                src_local[valid_mask], dst_local[valid_mask],
-            )
+            valid_src = src_local[valid_mask]
+            valid_dst = dst_local[valid_mask]
+            n_valid = len(valid_src)
+            valid_scores = np.empty(n_valid, dtype=np.float32)
+            score_batch = 100_000
+            for b_start in range(0, n_valid, score_batch):
+                b_end = min(b_start + score_batch, n_valid)
+                valid_scores[b_start:b_end] = _score_batch(
+                    heuristic, adj_undirected,
+                    valid_src[b_start:b_end], valid_dst[b_start:b_end],
+                )
+                if b_start % (score_batch * 5) == 0 and b_start > 0:
+                    print(f"    ... scored {b_start:,}/{n_valid:,}", flush=True)
             scores[valid_mask] = valid_scores
 
         ranks = np.empty(n_queries, dtype=np.float64)
