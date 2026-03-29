@@ -427,9 +427,78 @@ YADISK_TOKEN="..." PYTHONPATH=. python scripts/compute_stream_node_features.py \
 **Статус (2026-03-29):** Завершено. Результаты на Яндекс.Диске.
 features_10.parquet (60.5 MB), features_25.parquet (141.1 MB).
 
+### Sparse adjacency matrices and pair features (CN, AA)
+
+`scripts/compute_stream_adjacency.py` — построение бинарных sparse adjacency матриц
+(directed + undirected) из train-части stream graph для двух периодов (10% и 25%).
+
+**Зачем:** pair-level фичи (Common Neighbors, Adamic-Adar) нельзя предпосчитать для всех
+пар (N² ≈ 10¹²). Хранится adjacency матрица, из которой CN/AA вычисляются на лету
+за миллисекунды на batch. CN — самая сильная эвристика (MRR 0.73 на бейзлайнах),
+и именно pair-level структуры не хватает node-only моделям.
+
+**Протокол:** матрицы строятся ТОЛЬКО из train-рёбер (первые 70% периода).
+Ноды из val/test, которых нет в train → CN=0, AA=0 (корректно, нет data leakage).
+
+**Формат:** scipy CSR в `.npz`, float32, бинарные (0/1). Индексы — **локальные**
+(0..n_active-1). Маппинг local→global в `node_mapping_{label}.npy`.
+
+**ВАЖНО — единый маппинг:** `node_mapping` из adjacency **идентичен** `node_idx`
+из `features_{label}.parquet` (оба = `np.unique(concat([src_train, dst_train]))`).
+Это гарантировано конструкцией и проверяется assert'ами в скрипте.
+
+**Файлы на Яндекс.Диске** (для каждого периода 10/25):
+```
+stream_graph/
+  adj_{label}_directed.npz    # CSR (n_active × n_active), A[i,j]=1 if edge i→j
+  adj_{label}_undirected.npz  # CSR symmetric, A[i,j]=A[j,i]=1 if edge i→j or j→i
+  node_mapping_{label}.npy    # local_idx → global_idx (int64)
+  adj_{label}.json            # metadata (nnz, n_nodes, etc.)
+```
+
+**Использование pair features в модели (CN + AA):**
+```python
+from scipy import sparse
+from scripts.compute_stream_adjacency import compute_cn, compute_aa
+
+# Загрузка (один раз при старте):
+adj = sparse.load_npz("adj_10_undirected.npz")
+mapping = np.load("node_mapping_10.npy")
+
+# В каждом batch:
+# 1. Global → local маппинг
+local_src = np.searchsorted(mapping, batch_src_global)
+local_dst = np.searchsorted(mapping, batch_dst_global)
+# 2. Проверка что ноды есть в маппинге (val/test ноды без train-истории)
+valid_src = np.isin(batch_src_global, mapping)
+valid_dst = np.isin(batch_dst_global, mapping)
+valid = valid_src & valid_dst
+# 3. Вычисление pair features (только для valid пар, остальные = 0)
+cn = np.zeros(len(batch_src_global), dtype=np.float32)
+aa = np.zeros(len(batch_src_global), dtype=np.float32)
+if valid.any():
+    cn[valid] = compute_cn(adj, local_src[valid], local_dst[valid])
+    aa[valid] = compute_aa(adj, local_src[valid], local_dst[valid])
+```
+
+**Полный набор фичей для модели (на одну пару src→dst):**
+- 15 node features src + 15 node features dst = 30 (из features parquet)
+- CN_undirected, AA_undirected, CN_directed, AA_directed = 4 pair features
+- **Итого: 34 фичи на пару**
+
+**Запуск:**
+```bash
+YADISK_TOKEN="..." PYTHONPATH=. python scripts/compute_stream_adjacency.py \
+    --input /tmp/stream_graph_full.parquet \
+    --output-dir /tmp/stream_adjacency/ --upload \
+    2>&1 | tee /tmp/stream_adjacency.log
+```
+
+**Статус (2026-03-29):** Код готов, 29 тестов passing. Ждёт запуска на дев-машине.
+
 ### Tests
 
-206 tests total — all passing:
+235 tests total — all passing:
 - `tests/test_pipeline.py` — 11 tests for the data pipeline
 - `tests/test_compute_features.py` — 36 tests for feature computation (correctness,
   disk cleanup, resume, edge cases)
@@ -443,6 +512,8 @@ features_10.parquet (60.5 MB), features_25.parquet (141.1 MB).
   backend equivalence, negative sampling, edge cases, cross-validation)
 - `tests/test_stream_node_features.py` — 36 tests for stream node features (shape, dtype,
   finite, inactive nodes, hand-crafted per-feature checks, sparse format, load_node_features)
+- `tests/test_stream_adjacency.py` — 29 tests for adjacency matrices (CSR format, binary,
+  directed/undirected, CN/AA correctness, mapping consistency with node features, edge cases)
 
 ---
 
@@ -489,6 +560,7 @@ tests/
   test_models.py        # 42 tests for DL models and C++ extension
   test_stream_graph.py  # 16 tests for stream graph pipeline
   test_stream_node_features.py  # 36 tests for stream node features
+  test_stream_adjacency.py      # 29 tests for adjacency matrices and pair features
 data/
   samples/              # CSV samples for 2016-07-08 and 2016-07-09 (halving day)
   raw/                  # Raw ORBITAAL data (on dev machine only, gitignored)
@@ -648,6 +720,14 @@ orbitaal_processed/
     features_10.json                           # metadata
     features_25.parquet                        # node features from train of first 25% edges (4.3M nodes, 141 MB)
     features_25.json                           # metadata
+    adj_10_directed.npz                        # CSR binary adjacency, directed, train of 10%
+    adj_10_undirected.npz                      # CSR binary adjacency, undirected (symmetric)
+    node_mapping_10.npy                        # local→global index mapping for 10%
+    adj_10.json                                # metadata
+    adj_25_directed.npz                        # same for 25%
+    adj_25_undirected.npz
+    node_mapping_25.npy
+    adj_25.json
   experiments/                                 # Результаты экспериментов (создаётся launcher.py)
     exp_001_link_pred_baselines/
     exp_002_graph_level_baselines/
@@ -730,5 +810,6 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
    прирост скромный. Тем не менее модель сильнее GLFormer (interaction-aware, K=512).
 10. ~~Static node features for stream graph~~ **Done (2026-03-29).** 15 фичей, sparse формат,
     features_10 (60 MB) + features_25 (141 MB) на Яндекс.Диске.
-11. Graph-level forecasting **deprioritized**.
+11. **Adjacency matrices for pair features (CN, AA).** Код готов, 29 тестов. Ждёт запуска.
+12. Graph-level forecasting **deprioritized**.
 12. Pre-2010 period: filter to 2010+ or 2010-07-17+ (sparse/empty graphs before that).
