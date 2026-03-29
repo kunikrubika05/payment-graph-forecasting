@@ -25,14 +25,10 @@ External economic factors (price, news, market activity) matter more than intern
 
 ### Task formulations (from project description)
 
-1. **Link Prediction** — will edge (A->B) appear at time T+1? (GNN: GraphSAGE, GCN, GAT; Node2Vec + classifier)
-2. **Edge Weight Prediction** — transaction volume between A and B (Temporal GNN, RNN)
-3. **Graph-level Forecasting** — predict num_nodes, num_edges, total_volume as time series (SARIMAX, Prophet, TFT, hybrid models)
-4. **Node Activity Prediction** — will entity be active tomorrow? (classification)
+1. **Link Prediction** — will edge (A->B) appear at time T, if we know all previous information?
+2. **Edge Weight Prediction** — transaction volume between A and B.
 
-**Decision (2026-03-19):** Focus on **Link Prediction**. Graph-level forecasting deprioritized
-(weak connection to graph structure, no standard benchmark, low ceiling for improvement).
-Next step: GNN models (TGN, GraphSAGE) for temporal link prediction.
+**Decision (2026-03-19):** Focus on **Link Prediction**.
 
 ### Key findings from literature review
 
@@ -61,9 +57,7 @@ local copies to conserve disk space. Supports resume (skips already processed da
 1. **Link Prediction** — LogReg, CatBoost, RandomForest на агрегированных node features.
    Sliding window (W дней → предсказание рёбер дня W+1). Два режима: A (единая модель)
    и B (live-update). Per-source negative sampling: 50/50 historical + random.
-2. **Graph-level Forecasting** — ARIMA, SARIMAX, Holt-Winters, Prophet, naive baselines
-   на временных рядах из `graph_features.csv` (num_nodes, num_edges, total_btc, total_usd).
-3. **Heuristic Link Prediction** — Common Neighbors, Jaccard, Adamic-Adar, Preferential Attachment.
+2. **Heuristic Link Prediction** — Common Neighbors, Jaccard, Adamic-Adar, Preferential Attachment.
 
 **Протокол оценки (TGB-style):**
 - Per-source ranking: для каждого positive edge (s, d_true) фиксируется s, строится candidate
