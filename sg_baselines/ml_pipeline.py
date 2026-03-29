@@ -222,6 +222,14 @@ def _prebuild_eval_candidates(
     src_unique = unique_edges["src"].values.astype(np.int64)
     dst_unique = unique_edges["dst"].values.astype(np.int64)
 
+    train_node_set = set(node_mapping.tolist())
+    keep = np.array([
+        int(s) in train_node_set and int(d) in train_node_set
+        for s, d in zip(src_unique, dst_unique)
+    ], dtype=bool)
+    src_unique = src_unique[keep]
+    dst_unique = dst_unique[keep]
+
     all_positives_per_src: dict[int, set[int]] = {}
     for s, d in zip(src_unique, dst_unique):
         all_positives_per_src.setdefault(int(s), set()).add(int(d))
