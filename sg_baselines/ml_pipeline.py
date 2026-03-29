@@ -222,6 +222,10 @@ def _prebuild_eval_candidates(
     src_unique = unique_edges["src"].values.astype(np.int64)
     dst_unique = unique_edges["dst"].values.astype(np.int64)
 
+    all_positives_per_src: dict[int, set[int]] = {}
+    for s, d in zip(src_unique, dst_unique):
+        all_positives_per_src.setdefault(int(s), set()).add(int(d))
+
     if len(src_unique) > max_queries:
         rng_sub = np.random.RandomState(seed + 777)
         idx = rng_sub.choice(len(src_unique), size=max_queries, replace=False)
@@ -230,9 +234,6 @@ def _prebuild_eval_candidates(
         dst_unique = dst_unique[idx]
 
     n_queries = len(src_unique)
-    positives_per_src: dict[int, set[int]] = {}
-    for s, d in zip(src_unique, dst_unique):
-        positives_per_src.setdefault(int(s), set()).add(int(d))
 
     rng = np.random.RandomState(seed)
     all_src_flat = []
@@ -243,7 +244,7 @@ def _prebuild_eval_candidates(
         s = int(src_unique[i])
         d_true = int(dst_unique[i])
         negatives = sample_negatives_for_eval(
-            s, d_true, train_neighbors, positives_per_src.get(s, set()),
+            s, d_true, train_neighbors, all_positives_per_src.get(s, set()),
             active_nodes, config.n_negatives, rng,
         )
         candidates = np.concatenate([[d_true], negatives])
@@ -303,11 +304,13 @@ def _create_model(model_name: str, params: dict, seed: int) -> Any:
     """Create sklearn/catboost model with given hyperparameters."""
     if model_name == "logreg":
         from sklearn.linear_model import LogisticRegression
+        l1_ratio = 1.0 if params["penalty"] == "l1" else 0.0
         return LogisticRegression(
             C=params["C"],
-            penalty=params["penalty"],
-            solver="liblinear",
-            max_iter=1000,
+            penalty="elasticnet",
+            l1_ratio=l1_ratio,
+            solver="saga",
+            max_iter=2000,
             random_state=seed,
         )
     elif model_name == "catboost":
