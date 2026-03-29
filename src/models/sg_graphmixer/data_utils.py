@@ -62,6 +62,8 @@ def build_stream_graph_data(
     src_dense = _map_to_dense(src_global, global_to_dense, num_active)
     dst_dense = _map_to_dense(dst_global, global_to_dense, num_active)
 
+    btc = np.sign(btc) * np.log1p(np.abs(btc))
+    usd = np.sign(usd) * np.log1p(np.abs(usd))
     edge_feats = np.stack([btc, usd], axis=1)
 
     split_labels = np.zeros(len(all_edges), dtype=np.int8)
