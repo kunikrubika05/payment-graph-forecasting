@@ -79,7 +79,7 @@ def run_experiment(args):
     total_start = time.time()
 
     parquet_name = Path(args.parquet_path).stem
-    exp_name = f"glformer_{parquet_name}"
+    exp_name = args.exp_name if args.exp_name else f"glformer_{parquet_name}"
     output_dir = os.path.join(args.output, exp_name)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
@@ -114,6 +114,15 @@ def run_experiment(args):
     )
     data_time = time.time() - data_start
     logger.info("Data: %s (%.1f sec)", data, data_time)
+
+    if args.node_feats_path:
+        from scripts.compute_stream_node_features import load_node_features as _load_nf
+        logger.info("Loading node features from %s...", args.node_feats_path)
+        node_feats = _load_nf(args.node_feats_path, data.num_nodes)
+        data.node_feats = node_feats
+        if args.node_feat_dim == 0:
+            args.node_feat_dim = node_feats.shape[1]
+        logger.info("Node features: shape=%s, dim=%d", node_feats.shape, args.node_feat_dim)
 
     _save_data_summary(output_dir, data, train_mask, val_mask, test_mask)
 
@@ -250,6 +259,13 @@ def main():
     parser.add_argument(
         "--output", type=str, default="/tmp/glformer_results",
     )
+    parser.add_argument(
+        "--exp-name",
+        type=str,
+        default=None,
+        help="Experiment name used for local output dir and Yandex.Disk upload path. "
+             "Defaults to 'glformer_<parquet_stem>'.",
+    )
 
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=200)
@@ -281,7 +297,14 @@ def main():
     parser.add_argument(
         "--node-feat-dim", type=int, default=0,
         help="Dimension of query-node own features (0 = disabled). "
-             "Must match data.node_feats.shape[1] if non-zero.",
+             "Auto-detected from --node-feats-path if not set.",
+    )
+    parser.add_argument(
+        "--node-feats-path",
+        type=str,
+        default=None,
+        help="Path to node features parquet (features_10.parquet or features_25.parquet). "
+             "Sets --node-feat-dim automatically (15 features).",
     )
     parser.add_argument(
         "--use-cooccurrence", action="store_true",
