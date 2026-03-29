@@ -221,6 +221,7 @@ def train_epoch(
     use_amp: bool = True,
     scaler: Optional[torch.cuda.amp.GradScaler] = None,
     rng: Optional[np.random.Generator] = None,
+    neg_node_pool: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """Run one training epoch for GLFormer.
 
@@ -240,6 +241,10 @@ def train_epoch(
         use_amp: Enable mixed-precision training (CUDA only).
         scaler: GradScaler instance for AMP.
         rng: Random number generator.
+        neg_node_pool: Node index pool for negative sampling. When provided,
+            negatives are drawn from this array instead of the full node range.
+            Pass unique active training nodes to avoid trivially-easy inactive
+            negatives in datasets with sparse global node spaces.
 
     Returns:
         Dict with 'loss' (mean batch loss over the epoch).
@@ -275,7 +280,10 @@ def train_epoch(
         src = data.src[idx]
         dst = data.dst[idx]
         ts = data.timestamps[idx]
-        neg_dst = rng.integers(0, data.num_nodes, size=(B, neg_per_positive))
+        if neg_node_pool is not None:
+            neg_dst = rng.choice(neg_node_pool, size=(B, neg_per_positive))
+        else:
+            neg_dst = rng.integers(0, data.num_nodes, size=(B, neg_per_positive))
 
         batch = prepare_glformer_batch(
             csr, data, src, dst, ts, neg_dst, num_neighbors, device,
@@ -362,10 +370,11 @@ def validate(
     max_eval_edges: int = 5000,
     use_amp: bool = True,
     rng: Optional[np.random.Generator] = None,
+    neg_node_pool: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """Validate GLFormer with ranking metrics.
 
-    For each validation edge, generates n_eval_negatives random negatives,
+    For each validation edge, generates n_eval_negatives negatives,
     scores all candidates, and computes the rank of the true destination.
 
     Args:
@@ -376,10 +385,12 @@ def validate(
         edge_indices: Indices of edges to evaluate.
         device: Torch device.
         num_neighbors: K neighbors sampled per node.
-        n_eval_negatives: Number of random negatives per query.
+        n_eval_negatives: Number of negatives per query.
         max_eval_edges: Maximum edges to evaluate (subsampled for speed).
         use_amp: Enable mixed precision.
         rng: Random number generator.
+        neg_node_pool: Node index pool for negative sampling. When provided,
+            negatives are drawn from this array instead of the full node range.
 
     Returns:
         Dict with 'mrr', 'hits@1', 'hits@3', 'hits@10', 'mean_rank',
@@ -407,9 +418,12 @@ def validate(
         true_dst = data.dst[idx]
         ts = data.timestamps[idx]
 
-        neg_nodes = rng.integers(
-            0, data.num_nodes, size=n_eval_negatives
-        ).astype(np.int32)
+        if neg_node_pool is not None:
+            neg_nodes = rng.choice(neg_node_pool, size=n_eval_negatives).astype(np.int32)
+        else:
+            neg_nodes = rng.integers(
+                0, data.num_nodes, size=n_eval_negatives
+            ).astype(np.int32)
         all_dst = np.concatenate([[true_dst], neg_nodes])
         C = len(all_dst)
 
@@ -570,6 +584,7 @@ def train_glformer(
     train_csr = build_temporal_csr(data, train_mask)
     full_csr = build_temporal_csr(data, train_mask | val_mask)
 
+
     model = GLFormerTime(
         hidden_dim=hidden_dim,
         num_neighbors=num_neighbors,
@@ -599,6 +614,14 @@ def train_glformer(
 
     train_indices = np.where(train_mask)[0]
     val_indices = np.where(val_mask)[0]
+
+    train_active_nodes = np.unique(
+        np.concatenate([data.src[train_indices], data.dst[train_indices]])
+    ).astype(np.int32)
+    logger.info(
+        "Active training nodes: %d (out of %d total)",
+        len(train_active_nodes), data.num_nodes,
+    )
 
     history = {
         "train_loss": [],
@@ -654,6 +677,7 @@ def train_glformer(
             use_amp=use_amp,
             scaler=scaler,
             rng=rng,
+            neg_node_pool=train_active_nodes,
         )
 
         val_metrics = validate(
@@ -662,6 +686,7 @@ def train_glformer(
             max_eval_edges=max_val_edges,
             use_amp=use_amp,
             rng=rng,
+            neg_node_pool=train_active_nodes,
         )
 
         epoch_time = time.time() - epoch_start

@@ -2,22 +2,26 @@
 
 Usage:
     PYTHONPATH=. python src/models/GLFormer/glformer_hpo.py \\
-        --parquet-path stream_graph/2020-06-01_2020-08-31.parquet \\
-        --n-trials 30 --hpo-epochs 15 --edge-feat-dim 2 \\
+        --parquet-path /tmp/stream_graph_10pct.parquet \\
+        --node-feats-path /tmp/features_10.parquet \\
+        --n-trials 6 --hpo-epochs 10 --edge-feat-dim 2 \\
         --output /tmp/glformer_hpo 2>&1 | tee /tmp/glformer_hpo.log
 
-Designed to run within ~3 hours on A100. Uses MedianPruner to
-terminate underperforming trials early.
+Designed to run within ~4 hours on V100 (batch_size=4000, 10% dataset,
+1 epoch ≈ 4 min). Uses a 6-point grid search over the two parameters
+that matter most per the GLFormer paper (Figure 4 + Implementation Details):
 
-Key hyperparameters searched:
-    - hidden_dim: {50, 100, 200}
-    - num_neighbors: {10, 15, 20, 30}
+Fixed per paper:
+    - lr: 0.0001  (fixed across all paper experiments)
+    - weight_decay: 1e-5
+    - dropout: 0.1
+    - channel_expansion: 4.0
+    - num_neighbors: 20  (same as prior works per paper)
+    - batch_size: 4000   (passed via CLI, hardcoded in objective)
+
+Searched (6 combinations = full grid):
+    - hidden_dim: {100, 200}
     - num_glformer_layers: {1, 2, 3}
-    - lr: log-uniform [1e-4, 1e-2]
-    - weight_decay: log-uniform [1e-6, 1e-3]
-    - dropout: [0.0, 0.3]
-    - batch_size: {200, 400, 600}
-    - channel_expansion: {2.0, 4.0}
 """
 
 import argparse
@@ -33,8 +37,7 @@ import torch
 
 try:
     import optuna
-    from optuna.pruners import MedianPruner
-    from optuna.samplers import TPESampler
+    from optuna.samplers import GridSampler
 except ImportError:
     raise ImportError("Optuna is required for HPO: pip install optuna")
 
@@ -90,18 +93,14 @@ def create_objective(
     val_indices = np.where(val_mask)[0]
 
     def objective(trial):
-        hidden_dim = trial.suggest_categorical("hidden_dim", [50, 100, 200])
-        num_neighbors = trial.suggest_categorical(
-            "num_neighbors", [10, 15, 20, 30]
-        )
+        hidden_dim = trial.suggest_categorical("hidden_dim", [100, 200])
         num_glformer_layers = trial.suggest_int("num_glformer_layers", 1, 3)
-        lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
-        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
-        dropout = trial.suggest_float("dropout", 0.0, 0.3, step=0.05)
+        num_neighbors = 20
+        lr = 0.0001
+        weight_decay = 1e-5
+        dropout = 0.1
         batch_size = 4000
-        channel_expansion = trial.suggest_categorical(
-            "channel_expansion", [2.0, 4.0]
-        )
+        channel_expansion = 4.0
 
         seed = 42
         rng = np.random.default_rng(seed)
@@ -125,7 +124,7 @@ def create_objective(
             model.parameters(), lr=lr, weight_decay=weight_decay
         )
         amp_enabled = use_amp and device.type == "cuda"
-        scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+        scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
         best_mrr = 0.0
 
@@ -170,8 +169,8 @@ def main():
     parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--val-ratio", type=float, default=0.15)
     parser.add_argument("--output", type=str, default="/tmp/glformer_hpo")
-    parser.add_argument("--n-trials", type=int, default=30)
-    parser.add_argument("--hpo-epochs", type=int, default=15)
+    parser.add_argument("--n-trials", type=int, default=6)
+    parser.add_argument("--hpo-epochs", type=int, default=10)
     parser.add_argument("--max-val-edges", type=int, default=3000)
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
@@ -181,7 +180,11 @@ def main():
     )
     parser.add_argument(
         "--node-feat-dim", type=int, default=0,
-        help="Query-node feature dimension (0 = disabled).",
+        help="Query-node feature dimension (0 = disabled). Auto-detected from --node-feats-path.",
+    )
+    parser.add_argument(
+        "--node-feats-path", type=str, default=None,
+        help="Path to node features parquet (features_10.parquet or features_25.parquet).",
     )
     parser.add_argument(
         "--use-cooccurrence", action="store_true",
@@ -214,6 +217,15 @@ def main():
     )
     logger.info("Data: %s", data)
 
+    if args.node_feats_path:
+        from scripts.compute_stream_node_features import load_node_features as _load_nf
+        logger.info("Loading node features from %s...", args.node_feats_path)
+        node_feats = _load_nf(args.node_feats_path, data.num_nodes)
+        data.node_feats = node_feats
+        if args.node_feat_dim == 0:
+            args.node_feat_dim = node_feats.shape[1]
+        logger.info("Node features: shape=%s, dim=%d", node_feats.shape, args.node_feat_dim)
+
     objective = create_objective(
         data, train_mask, val_mask, device,
         hpo_epochs=args.hpo_epochs,
@@ -226,10 +238,13 @@ def main():
     )
 
     parquet_name = Path(args.parquet_path).stem
+    search_space = {
+        "hidden_dim": [100, 200],
+        "num_glformer_layers": [1, 2, 3],
+    }
     study = optuna.create_study(
         direction="maximize",
-        sampler=TPESampler(seed=args.seed),
-        pruner=MedianPruner(n_startup_trials=5, n_warmup_steps=3),
+        sampler=GridSampler(search_space),
         study_name=f"glformer_hpo_{parquet_name}",
     )
 
