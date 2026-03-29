@@ -281,7 +281,8 @@ def train_epoch(
         dst = data.dst[idx]
         ts = data.timestamps[idx]
         if neg_node_pool is not None:
-            neg_dst = rng.choice(neg_node_pool, size=(B, neg_per_positive))
+            idx = rng.integers(0, len(neg_node_pool), size=(B, neg_per_positive))
+            neg_dst = neg_node_pool[idx]
         else:
             neg_dst = rng.integers(0, data.num_nodes, size=(B, neg_per_positive))
 
@@ -352,7 +353,7 @@ def train_epoch(
 
         total_loss += loss.item()
         num_batches += 1
-        pbar.set_postfix(loss=f"{total_loss / num_batches:.4f}")
+        pbar.set_postfix(loss=f"{total_loss / num_batches:.8f}")
 
     pbar.close()
     return {"loss": total_loss / max(num_batches, 1)}
@@ -419,7 +420,8 @@ def validate(
         ts = data.timestamps[idx]
 
         if neg_node_pool is not None:
-            neg_nodes = rng.choice(neg_node_pool, size=n_eval_negatives).astype(np.int32)
+            idx = rng.integers(0, len(neg_node_pool), size=n_eval_negatives)
+            neg_nodes = neg_node_pool[idx].astype(np.int32)
         else:
             neg_nodes = rng.integers(
                 0, data.num_nodes, size=n_eval_negatives
@@ -494,11 +496,7 @@ def validate(
             ).cpu().float().numpy()
 
         true_score = scores[0]
-        rank = (
-            1.0
-            + (scores[1:] > true_score).sum()
-            + 0.5 * (scores[1:] == true_score).sum()
-        )
+        rank = 1.0 + (scores[1:] > true_score).sum()
         ranks.append(rank)
 
     ranks = np.array(ranks, dtype=np.float64)
@@ -699,7 +697,7 @@ def train_glformer(
         history["epoch_time"].append(epoch_time)
 
         logger.info(
-            "Epoch %d/%d [%.1fs] loss=%.4f mrr=%.4f h@1=%.3f h@3=%.3f h@10=%.3f",
+            "Epoch %d/%d [%.1fs] loss=%.8f mrr=%.4f h@1=%.3f h@3=%.3f h@10=%.3f",
             epoch, num_epochs, epoch_time,
             train_metrics["loss"],
             val_metrics["mrr"], val_metrics["hits@1"],

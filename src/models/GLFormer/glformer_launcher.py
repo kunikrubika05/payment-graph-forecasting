@@ -18,9 +18,11 @@ import logging
 import os
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 
 from src.models.GLFormer.data_utils import load_stream_graph_data, TemporalCSR
@@ -74,6 +76,53 @@ def _save_training_curves(output_dir, history):
         writer.writerows(rows)
 
 
+def _build_eval_infrastructure(parquet_path, train_ratio, val_ratio):
+    """Build train_neighbors, active_nodes, and directed eval edges from parquet.
+
+    Reads the DIRECTED parquet to build evaluation infrastructure matching
+    the baseline protocol (sg_baselines). This is separate from the undirected
+    TemporalEdgeData used for model training/neighbor lookup.
+
+    Returns:
+        dict with keys: train_neighbors, active_nodes,
+        val_src, val_dst, val_ts, test_src, test_dst, test_ts,
+        n_train, n_val, n_test.
+    """
+    df = pd.read_parquet(parquet_path)
+    n_total = len(df)
+    train_end = int(n_total * train_ratio)
+    val_end = int(n_total * (train_ratio + val_ratio))
+
+    train_df = df.iloc[:train_end]
+    val_df = df.iloc[train_end:val_end]
+    test_df = df.iloc[val_end:]
+
+    train_src = train_df["src_idx"].values
+    train_dst = train_df["dst_idx"].values
+    train_neighbors: dict[int, set[int]] = defaultdict(set)
+    for s, d in zip(train_src, train_dst):
+        train_neighbors[int(s)].add(int(d))
+    train_neighbors = dict(train_neighbors)
+
+    active_nodes = np.unique(
+        np.concatenate([train_src, train_dst])
+    ).astype(np.int64)
+
+    return {
+        "train_neighbors": train_neighbors,
+        "active_nodes": active_nodes,
+        "val_src": val_df["src_idx"].values.astype(np.int32),
+        "val_dst": val_df["dst_idx"].values.astype(np.int32),
+        "val_ts": val_df["timestamp"].values.astype(np.float64),
+        "test_src": test_df["src_idx"].values.astype(np.int32),
+        "test_dst": test_df["dst_idx"].values.astype(np.int32),
+        "test_ts": test_df["timestamp"].values.astype(np.float64),
+        "n_train": len(train_df),
+        "n_val": len(val_df),
+        "n_test": len(test_df),
+    }
+
+
 def run_experiment(args):
     """Run a full GLFormer experiment: load data, train, evaluate, upload."""
     total_start = time.time()
@@ -104,7 +153,7 @@ def run_experiment(args):
             torch.cuda.get_device_properties(0).total_memory / 1e9,
         )
 
-    logger.info("Step 1: Loading stream graph from %s...", args.parquet_path)
+    logger.info("Step 1a: Loading stream graph (undirected) from %s...", args.parquet_path)
     data_start = time.time()
     data, train_mask, val_mask, test_mask = load_stream_graph_data(
         args.parquet_path,
@@ -112,8 +161,18 @@ def run_experiment(args):
         val_ratio=args.val_ratio,
         undirected=True,
     )
+    logger.info("Data: %s (%.1f sec)", data, time.time() - data_start)
+
+    logger.info("Step 1b: Building eval infrastructure (directed edges)...")
+    eval_infra = _build_eval_infrastructure(
+        args.parquet_path, args.train_ratio, args.val_ratio
+    )
+    logger.info(
+        "Directed split: train=%d, val=%d, test=%d. Active nodes: %d",
+        eval_infra["n_train"], eval_infra["n_val"], eval_infra["n_test"],
+        len(eval_infra["active_nodes"]),
+    )
     data_time = time.time() - data_start
-    logger.info("Data: %s (%.1f sec)", data, data_time)
 
     if args.node_feats_path:
         from scripts.compute_stream_node_features import load_node_features as _load_nf
@@ -156,24 +215,44 @@ def run_experiment(args):
 
     _save_training_curves(output_dir, history)
 
-    logger.info("Step 3: TGB-style evaluation on test set...")
-    eval_start = time.time()
-    all_before_test = train_mask | val_mask
     from src.models.GLFormer.data_utils import build_temporal_csr
-    test_csr = build_temporal_csr(data, all_before_test)
 
+    logger.info("Step 3a: TGB-style evaluation on val set (directed, baseline protocol)...")
+    eval_start = time.time()
+    train_csr_for_val = build_temporal_csr(data, train_mask)
+    val_metrics = evaluate_tgb_style(
+        model=model,
+        data=data,
+        csr=train_csr_for_val,
+        eval_src=eval_infra["val_src"],
+        eval_dst=eval_infra["val_dst"],
+        eval_ts=eval_infra["val_ts"],
+        train_neighbors=eval_infra["train_neighbors"],
+        active_nodes=eval_infra["active_nodes"],
+        device=device,
+        num_neighbors=args.num_neighbors,
+        use_amp=not args.no_amp,
+        seed=args.seed + 200,
+        max_edges=50_000,
+    )
+
+    logger.info("Step 3b: TGB-style evaluation on test set (directed, baseline protocol)...")
+    all_before_test = train_mask | val_mask
+    test_csr = build_temporal_csr(data, all_before_test)
     test_metrics = evaluate_tgb_style(
         model=model,
         data=data,
         csr=test_csr,
-        eval_mask=test_mask,
+        eval_src=eval_infra["test_src"],
+        eval_dst=eval_infra["test_dst"],
+        eval_ts=eval_infra["test_ts"],
+        train_neighbors=eval_infra["train_neighbors"],
+        active_nodes=eval_infra["active_nodes"],
         device=device,
         num_neighbors=args.num_neighbors,
-        n_hist_neg=50,
-        n_random_neg=50,
         use_amp=not args.no_amp,
-        seed=args.seed,
-        max_edges=args.max_test_edges,
+        seed=args.seed + 400,
+        max_edges=args.max_test_edges if args.max_test_edges else 50_000,
     )
     eval_time = time.time() - eval_start
     total_time = time.time() - total_start
@@ -182,6 +261,7 @@ def run_experiment(args):
         "experiment": exp_name,
         "parquet_path": args.parquet_path,
         "model": "GLFormerTime",
+        "val_metrics": val_metrics,
         "test_metrics": test_metrics,
         "best_val_mrr": (
             float(history["val_mrr"][np.argmax(history["val_mrr"])])
@@ -209,12 +289,16 @@ def run_experiment(args):
 
     logger.info("=" * 60)
     logger.info("RESULTS: %s", exp_name)
+    logger.info("  Val MRR:      %.4f", val_metrics["mrr"])
+    logger.info("  Val Hits@1:   %.4f", val_metrics["hits@1"])
+    logger.info("  Val Hits@3:   %.4f", val_metrics["hits@3"])
+    logger.info("  Val Hits@10:  %.4f", val_metrics["hits@10"])
     logger.info("  Test MRR:     %.4f", test_metrics["mrr"])
     logger.info("  Test Hits@1:  %.4f", test_metrics["hits@1"])
     logger.info("  Test Hits@3:  %.4f", test_metrics["hits@3"])
     logger.info("  Test Hits@10: %.4f", test_metrics["hits@10"])
     logger.info(
-        "  Best val MRR: %.4f (epoch %d)",
+        "  Best val MRR (training): %.4f (epoch %d)",
         final_results["best_val_mrr"],
         final_results["best_epoch"],
     )

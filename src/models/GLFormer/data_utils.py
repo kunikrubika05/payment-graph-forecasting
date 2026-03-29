@@ -20,7 +20,6 @@ from src.models.EAGLE.data_utils import (
     TemporalCSR,
     build_temporal_csr,
     chronological_split,
-    generate_negatives_for_eval,
     sample_neighbors_batch,
 )
 
@@ -32,6 +31,5 @@ __all__ = [
     "TemporalCSR",
     "build_temporal_csr",
     "chronological_split",
-    "generate_negatives_for_eval",
     "sample_neighbors_batch",
 ]
