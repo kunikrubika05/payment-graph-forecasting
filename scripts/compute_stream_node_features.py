@@ -71,11 +71,21 @@ def compute_node_features(
         Tuple of (active_global_indices int64, features float32) where
         features.shape == (n_active, 15).
     """
+    assert len(src) == len(dst) == len(ts) == len(btc), (
+        f"Array length mismatch: src={len(src)}, dst={len(dst)}, ts={len(ts)}, btc={len(btc)}"
+    )
+    assert len(src) > 0, "Empty edge arrays"
+    assert src.dtype == np.int64 and dst.dtype == np.int64, "src/dst must be int64"
+    assert ts.dtype == np.int64, "timestamps must be int64"
+
     active_set = np.unique(np.concatenate([src, dst]))
     n_active = len(active_set)
+    assert n_active >= 2, f"Need at least 2 active nodes, got {n_active}"
 
     src_local = np.searchsorted(active_set, src)
     dst_local = np.searchsorted(active_set, dst)
+    assert src_local.max() < n_active, "searchsorted produced out-of-bounds local index (src)"
+    assert dst_local.max() < n_active, "searchsorted produced out-of-bounds local index (dst)"
 
     btc64 = btc.astype(np.float64)
     features = np.zeros((n_active, 15), dtype=np.float64)
@@ -295,6 +305,14 @@ def process_period(
 
     n_period = len(period)
     n_train = len(train)
+    assert n_train > 0, f"Empty train set for fraction={fraction}"
+    assert n_train < n_period, "Train must be a proper subset of period"
+
+    train_ts_max = train["timestamp"].iloc[-1]
+    val_ts_min = period.iloc[train_end]["timestamp"]
+    assert train_ts_max <= val_ts_min, (
+        f"Train/val time overlap! train_max={train_ts_max}, val_min={val_ts_min}"
+    )
     print(f"  period={n_period:,} edges, train={n_train:,} edges")
 
     src = train["src_idx"].values.astype(np.int64)
