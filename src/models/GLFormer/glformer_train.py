@@ -54,10 +54,11 @@ def _compute_cooccurrence(
     dst_nids: np.ndarray,
     dst_lens: np.ndarray,
 ) -> np.ndarray:
-    """Compute intersection size between neighbor sets for each batch element.
+    """Compute intersection size between sampled neighbor sets (fallback).
 
-    For batch element b, returns |neighbors(src_b) ∩ neighbors(dst_b)|
-    where neighbors are the actual (non-padded) neighbor node IDs.
+    Uses only the K most-recent sampled neighbors — approximate and noisy
+    for nodes with many neighbors. Prefer _compute_cn_from_adj when a
+    pre-built adjacency matrix is available.
 
     Args:
         src_nids: [B, K] source neighbor node IDs.
@@ -77,6 +78,48 @@ def _compute_cooccurrence(
     return cooc
 
 
+def _compute_cn_from_adj(
+    adj,
+    node_mapping: np.ndarray,
+    src_global: np.ndarray,
+    dst_global: np.ndarray,
+) -> np.ndarray:
+    """Compute Common Neighbors using the full train adjacency matrix.
+
+    Looks up each (src, dst) pair in the pre-built sparse adjacency matrix
+    via adj[src].multiply(adj[dst]).sum(axis=1). Nodes absent from the
+    training graph (not in node_mapping) get CN=0.
+
+    Args:
+        adj: scipy CSR binary adjacency matrix (local indices, n_active × n_active).
+        node_mapping: int64 array of length n_active mapping local_idx → global_idx.
+            Must be sorted (output of np.unique).
+        src_global: [B] source global node IDs.
+        dst_global: [B] destination global node IDs.
+
+    Returns:
+        [B] float32 array of Common Neighbor counts.
+    """
+    src_g = np.asarray(src_global, dtype=np.int64)
+    dst_g = np.asarray(dst_global, dtype=np.int64)
+    n = adj.shape[0]
+
+    src_local = np.searchsorted(node_mapping, src_g)
+    dst_local = np.searchsorted(node_mapping, dst_g)
+
+    src_in = (src_local < n) & (node_mapping[np.minimum(src_local, n - 1)] == src_g)
+    dst_in = (dst_local < n) & (node_mapping[np.minimum(dst_local, n - 1)] == dst_g)
+    valid = src_in & dst_in
+
+    result = np.zeros(len(src_g), dtype=np.float32)
+    if valid.any():
+        sv, dv = src_local[valid], dst_local[valid]
+        result[valid] = np.array(
+            adj[sv].multiply(adj[dv]).sum(axis=1), dtype=np.float32
+        ).ravel()
+    return result
+
+
 def prepare_glformer_batch(
     csr: TemporalCSR,
     data: TemporalEdgeData,
@@ -89,6 +132,8 @@ def prepare_glformer_batch(
     use_edge_feats: bool = True,
     use_node_feats: bool = False,
     use_cooccurrence: bool = False,
+    adj=None,
+    node_mapping: Optional[np.ndarray] = None,
 ) -> Dict[str, torch.Tensor]:
     """Prepare a training batch for GLFormer.
 
@@ -116,6 +161,13 @@ def prepare_glformer_batch(
         use_edge_feats: Include per-neighbor edge feature vectors (btc/usd).
         use_node_feats: Include query-node own feature vectors.
         use_cooccurrence: Compute and include shared-neighbor counts.
+        adj: scipy CSR binary adjacency matrix (local indices) for full-graph
+            CN computation. When provided (together with node_mapping), CN is
+            computed from the full train adjacency instead of the K-sampled
+            neighbor intersection. Nodes absent from the training graph get
+            CN=0.
+        node_mapping: int64 sorted array mapping local_idx → global_idx.
+            Required when adj is not None.
 
     Returns:
         Dictionary of tensors for the GLFormerTime forward pass.
@@ -195,13 +247,24 @@ def prepare_glformer_batch(
         batch["neg_dst_node_feats"] = _t(neg_nf.reshape(batch_size, num_neg, -1))
 
     if use_cooccurrence:
-        pos_cooc = _compute_cooccurrence(src_nids, src_len, pos_nids, pos_len)
-
-        src_nids_rep = np.repeat(src_nids, num_neg, axis=0)
-        src_len_rep = np.repeat(src_len, num_neg)
-        neg_cooc_flat = _compute_cooccurrence(
-            src_nids_rep, src_len_rep, neg_nids, neg_len
-        )
+        if adj is not None and node_mapping is not None:
+            pos_cooc = _compute_cn_from_adj(
+                adj, node_mapping,
+                src_nodes.astype(np.int64),
+                dst_nodes.astype(np.int64),
+            )
+            neg_cooc_flat = _compute_cn_from_adj(
+                adj, node_mapping,
+                np.repeat(src_nodes.astype(np.int64), num_neg),
+                neg_flat.astype(np.int64),
+            )
+        else:
+            pos_cooc = _compute_cooccurrence(src_nids, src_len, pos_nids, pos_len)
+            src_nids_rep = np.repeat(src_nids, num_neg, axis=0)
+            src_len_rep = np.repeat(src_len, num_neg)
+            neg_cooc_flat = _compute_cooccurrence(
+                src_nids_rep, src_len_rep, neg_nids, neg_len
+            )
         batch["pos_cooc_counts"] = _t(pos_cooc)
         batch["neg_cooc_counts"] = _t(neg_cooc_flat.reshape(batch_size, num_neg))
 
@@ -222,6 +285,8 @@ def train_epoch(
     scaler: Optional[torch.cuda.amp.GradScaler] = None,
     rng: Optional[np.random.Generator] = None,
     neg_node_pool: Optional[np.ndarray] = None,
+    adj=None,
+    node_mapping: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """Run one training epoch for GLFormer.
 
@@ -291,6 +356,8 @@ def train_epoch(
             use_edge_feats=use_edge_feats,
             use_node_feats=use_node_feats,
             use_cooccurrence=use_cooc,
+            adj=adj,
+            node_mapping=node_mapping,
         )
 
         with _amp_autocast(amp_enabled, device.type):
@@ -372,6 +439,8 @@ def validate(
     use_amp: bool = True,
     rng: Optional[np.random.Generator] = None,
     neg_node_pool: Optional[np.ndarray] = None,
+    adj=None,
+    node_mapping: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """Validate GLFormer with ranking metrics.
 
@@ -464,11 +533,18 @@ def validate(
 
         cooc_counts = None
         if use_cooc:
-            src_nids_rep = np.repeat(src_nids, C, axis=0)
-            src_lens_rep = np.repeat(src_lens, C)
-            cooc_np = _compute_cooccurrence(
-                src_nids_rep, src_lens_rep, dst_nids, dst_lens
-            )
+            if adj is not None and node_mapping is not None:
+                cooc_np = _compute_cn_from_adj(
+                    adj, node_mapping,
+                    np.full(C, src_node, dtype=np.int64),
+                    all_dst.astype(np.int64),
+                )
+            else:
+                src_nids_rep = np.repeat(src_nids, C, axis=0)
+                src_lens_rep = np.repeat(src_lens, C)
+                cooc_np = _compute_cooccurrence(
+                    src_nids_rep, src_lens_rep, dst_nids, dst_lens
+                )
             cooc_counts = torch.tensor(cooc_np, dtype=torch.float32, device=device)
 
         def _t(arr, dtype=torch.float32):
@@ -533,6 +609,8 @@ def train_glformer(
     node_feat_dim: int = 0,
     use_cooccurrence: bool = False,
     cooc_dim: int = 16,
+    adj=None,
+    node_mapping: Optional[np.ndarray] = None,
 ) -> Tuple[GLFormerTime, Dict]:
     """Full GLFormer training pipeline with early stopping.
 
@@ -563,6 +641,11 @@ def train_glformer(
         node_feat_dim: Query-node feature dimension (0 = disabled).
         use_cooccurrence: Enable shared-neighbor co-occurrence features.
         cooc_dim: Co-occurrence encoding dimension.
+        adj: scipy CSR binary adjacency matrix for full-graph CN computation.
+            Built from train edges only. When None, falls back to K-sampled
+            neighbor intersection.
+        node_mapping: int64 sorted array mapping local_idx → global_idx.
+            Required when adj is not None.
 
     Returns:
         Tuple of (best model with loaded checkpoint, training history dict).
@@ -676,6 +759,8 @@ def train_glformer(
             scaler=scaler,
             rng=rng,
             neg_node_pool=train_active_nodes,
+            adj=adj,
+            node_mapping=node_mapping,
         )
 
         val_metrics = validate(
@@ -685,6 +770,8 @@ def train_glformer(
             use_amp=use_amp,
             rng=rng,
             neg_node_pool=train_active_nodes,
+            adj=adj,
+            node_mapping=node_mapping,
         )
 
         epoch_time = time.time() - epoch_start
