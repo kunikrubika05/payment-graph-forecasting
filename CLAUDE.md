@@ -47,77 +47,10 @@ Next step: GNN models (TGN, GraphSAGE) for temporal link prediction.
 ---
 
 ## What has been done
-
-### Data pipeline (complete)
-
-Full pipeline in `src/build_pipeline.py`: download -> extract -> mapping -> snapshots -> upload.
-All 5 steps have been executed on the dev machine. Results uploaded to Yandex.Disk.
-
-**Processed data structure on Yandex.Disk** (`orbitaal_processed/`):
-```
-orbitaal_processed/
-  node_mapping.parquet        # 320M+ entities -> dense 0..N-1 index
-  daily_stats.csv             # per-day statistics (4401 rows)
-  daily_snapshots/
-    2009-01-03.parquet        # one file per day
-    ...
-    2021-01-25.parquet        # 4401 files total
-```
-
-**Raw data:** Первая дев-машинка (8 cores / 64 GB / 200 GB SSD) была уничтожена 2026-03-15.
-Raw-файлы (`orbitaal-nodetable.tar.gz`, `orbitaal-stream_graph.tar.gz`) утеряны.
-Все обработанные данные и 9 завершённых экспериментов сохранены на Яндекс.Диске.
-При необходимости raw-данные можно скачать заново с Zenodo.
-
-### Data quality notes
-
-- **5 missing dates**: 2009-01-04 through 2009-01-08 (no blocks mined between genesis and block 1)
-- **257 days with 0 edges** (245 in 2009, 12 in 2010) — all transactions involved entity 0 (coinbase), which is excluded
-- **USD = 0 before 2010-07-17** — no market price existed before Mt. Gox launch. This is correct, not a bug
-- **Last day (2021-01-25) is truncated**: 62K nodes vs ~500K typical. Exclude from training
-- **float32 precision artifacts** in btc values (e.g. 134.08999633789062) — acceptable for ML
-- **~14.6% node overlap** between consecutive days — most entities appear and disappear within one day
-
-### Feature computation pipeline
-
-`src/compute_features.py`: computes graph-level and node-level features from daily snapshots.
-Uses scipy.sparse for PageRank, clustering, connected components; custom Batagelj-Zaversnik
-for k-core. No networkx dependency at runtime.
-
-**Graph-level features** (~40 columns): degree stats, Gini, BTC/USD aggregates, WCC/SCC,
-clustering, triangles, PageRank stats, k-core, assortativity, reciprocity.
-
-**Node-level features** (26 columns per node): degree, weighted degree, balance, transaction
-stats (avg/median/max/min/std BTC), unique counterparties, PageRank, clustering, k-core, triangles.
-
-**OOM-защита:** перед вычислением `A @ A` (для кластеризации и треугольников) оценивается
-размер результата как `sum(deg²) * 12 bytes`. Если >40 ГБ — эти фичи пропускаются (= 0).
-Это затрагивает ~50 дней периода Bitcoin-пузыря (конец 2017 — начало 2018), где графы
-особенно плотные. Все остальные фичи для этих дней считаются нормально.
-
-**Output:**
-```
-data/processed/
-  graph_features.csv            # one row per day, ~40 columns
-  node_features/
-    2009-01-03.parquet          # one file per day, only active nodes
-    ...
 ```
 
 Supports `--upload` mode: uploads node features to Yandex.Disk in batches and deletes
 local copies to conserve disk space. Supports resume (skips already processed days).
-
-**Статус:** Все 4401 день посчитаны. Данные на Яндекс.Диске.
-
-**Что есть:**
-- **graph_features.csv** — 4401 строка данных (все дни с 2009-01-03 по 2021-01-25).
-  На дев-машине и на Яндекс.Диске.
-- **Node features** — 4144 файла на Яндекс.Диске. Из 4401 дня 257 имеют 0 рёбер
-  (245 в 2009, 12 в 2010) — все транзакции шли через entity 0 (coinbase), который
-  исключён. Для этих 257 дней node features НЕ существуют — это ожидаемое поведение.
-- **~50 дней (2017-12-02 — 2018-01-20)**: clustering_coeff и triangle_count = 0
-  из-за OOM-защиты (`A @ A` на графах ~500K узлов требует >60 ГБ RAM).
-  Все остальные ~35 фичей для этих дней посчитаны полностью.
 
 ### Baseline experiments pipeline
 
@@ -163,16 +96,6 @@ Pair features используют float32 для экономии памяти 
 - `src/baselines/heuristic_baselines.py` — heuristic scores pipeline
 - `src/baselines/runner.py` — обработка очереди конфигов с resume и error handling
 - `src/baselines/launcher.py` — генерация 35 экспериментов (22 LP + 3 graph forecast + 10 heuristic), распределение по tmux-сессиям
-
-**Запуск на дев-машине:**
-```bash
-cd ~/payment-graph-forecasting && git pull
-source venv/bin/activate && pip install -e ".[baselines,dev]"
-pytest tests/test_baselines.py -v
-export YADISK_TOKEN="..."
-export RF_N_JOBS=4          # RF параллелизм (cores / sessions)
-export CATBOOST_THREADS=4   # CatBoost параллелизм
-PYTHONPATH=. python src/baselines/launcher.py --sessions 4
 ```
 
 **Мониторинг:** `tmux ls`, `tail -f /tmp/baseline_logs/baseline_N.log`,
@@ -185,36 +108,8 @@ PYTHONPATH=. python src/baselines/launcher.py --sessions 4
 **Структура результатов на Яндекс.Диске:**
 ```
 orbitaal_processed/experiments/
-  exp_001_link_pred_baselines/
-    period_mid_2015q3_w7_mean_modeA/
-      config.json, metrics.jsonl, summary.json
-      hp_search_results.json, feature_importance.json
-      feature_correlations.csv, high_correlations.json
-      model/best_logreg.pkl, best_catboost.cbm, best_rf.pkl
-      predictions/2015-09-15_logreg.parquet
-  exp_002_graph_level_baselines/
-  exp_003_heuristic_baselines/
+  exp_xxx_<short_desc>
 ```
-
-**Статус baseline экспериментов (2026-03-19):**
-
-Всего 35 экспериментов (22 LP + 3 graph forecast + 10 heuristic).
-Завершено **33/35**, все на Яндекс.Диске. 2 heuristic эксперимента (mid_2015q3 w7)
-не досчитаны из-за отключения дев-машины — некритично для выводов.
-
-**Результаты (MRR, TGB-style ranking):**
-- LogReg: 0.17-0.37 — needs review
-- CatBoost: 0.34-0.62 — needs review
-- RF: 0.33-0.63 — needs review
-- Heuristic CN: 0.46-0.73 (лучший метод на всех периодах)
-- Heuristic AA: 0.43-0.72, Jaccard: 0.36-0.66, PA: 0.29-0.55
-
-**Ключевые выводы:**
-- CN побеждает ML-модели → графовая структура критически важна
-- Качество растёт от ранних (2012) к зрелым (2020) периодам
-- Размер окна, агрегация, Mode A/B влияют слабо
-- Graph-level forecasting: persistence MAPE 11-17%, ARIMA/SARIMAX улучшают на 1-3 п.п.
-- Подробные таблицы: `docs/baseline_results_summary.md`, `docs/baseline_results_for_llm.md`
 
 ### DL models for temporal link prediction
 
@@ -248,23 +143,6 @@ YADISK_TOKEN="..." PYTHONPATH=. python src/models/launcher.py \
 
 **Документация:** `docs/graphmixer_pipeline.md` — полное описание архитектуры, пайплайна,
 параметров CLI и структуры результатов.
-
-**Статус (2026-03-25):** Первый эксперимент завершён на T4 (immers.cloud).
-
-**Результаты GraphMixer (mature_2020q2, window=7):**
-- Test MRR: **0.430**, Hits@1: 0.318, Hits@3: 0.464, Hits@10: 0.647
-- Val MRR: 0.538 (best epoch 100/100 — early stopping не сработал)
-- Обучение: 15.5 часов на T4, ~556 сек/эпоха, CPU bottleneck ~75% (neighbor sampling)
-- Данные: 9 дней (train 7d, val 1d, test 1d), 11M рёбер, 2.5M узлов
-
-**Выводы:**
-- GraphMixer (0.430) значительно слабее CN (0.732) — additive classifier не может
-  выучить взаимодействие src-dst (общие соседи и т.д.)
-- Модель не доучилась (best=epoch 100), потенциально +0.02-0.05 при 200 эпохах
-- CPU bottleneck: neighbor sampling занимает ~75% времени. Решение: PyG GPU sampling
-  или переход на PyTorch Geometric для следующих моделей
-- GraphMixer выполнил роль первого DL baseline. Дальше нужны модели с interaction-aware
-  scoring (TGN, DyGFormer и др.)
 
 **Инфраструктура:** `docs/dev_machine_guide.md` — инструкция по работе с GPU машиной (immers.cloud).
 
@@ -350,23 +228,6 @@ usd (float32)     — VALUE_USD
 
 **Запуск на дев-машине (CPU, без GPU):**
 ```bash
-# 1. Подключение
-ssh -i /path/to/your-key.pem ubuntu@<IP>
-chmod 600 /path/to/your-key.pem
-
-# 2. Настройка (один раз)
-sudo apt update && sudo apt install -y python3-venv python3-pip
-cd ~ && git clone https://github.com/kunikrubika05/payment-graph-forecasting.git
-cd payment-graph-forecasting
-python3 -m venv venv
-source venv/bin/activate
-pip install -e ".[all]"
-
-# 3. Запуск в tmux
-tmux new -s stream
-cd ~/payment-graph-forecasting && source venv/bin/activate
-export YADISK_TOKEN="..."
-
 PYTHONPATH=. python src/build_stream_graph.py \
     --steps download extract process upload \
     --start-date 2020-06-01 --end-date 2020-08-31 \
@@ -376,8 +237,6 @@ PYTHONPATH=. python src/build_stream_graph.py \
     --steps extract process upload \
     --start-date 2020-06-01 --end-date 2020-08-31 \
     2>&1 | tee /tmp/stream_graph.log
-
-# Отсоединиться: Ctrl+B, D
 ```
 
 **Рекомендуемый конфиг:** `cpu.4.8.120` (4 vCPU, 8 GB RAM, 120 GB SSD) — 2837 ₽/мес.
@@ -594,21 +453,6 @@ with a README.md describing setup, hyperparameters, results, and links to artifa
 - **Do NOT commit or push** unless the user explicitly asks to prepare git commands for them to copy-paste.
 - **Do NOT modify CLAUDE.md** without explicit user approval.
 
-### Git workflow (for reference — executed by the user)
-
-1. Create a feature/fix branch: `git checkout -b feature/<name>`
-2. Stage and commit changes
-3. Push: `git push --set-upstream origin feature/<name>` (this prints a PR link)
-4. Open the PR link in the browser, review, merge via GitHub UI
-5. After merge:
-```bash
-git checkout main
-git pull
-git branch -d feature/<name>
-```
-
-Branch naming: `feature/<name>`, `fix/<name>`, `experiment/<name>`
-
 ### Code quality
 
 - **Write tests** for any new functionality. Place them in `tests/`.
@@ -628,12 +472,6 @@ Branch naming: `feature/<name>`, `fix/<name>`, `experiment/<name>`
 - **Log file per process** — if a process crashes, the log must survive for diagnosis
 - **Never run long processes without logging** — silent crashes are unacceptable
 
-### Resource utilization
-
-- **Do NOT let dev machine CPU/GPU idle** while waiting. If a long process uses 1 core, consider running independent work on remaining cores.
-- **Parallelization safety:** for heavy graphs (2017+, ~500K nodes), max 1-2 workers on 64 GB RAM. Sparse matrix multiply (A²·A for triangles/clustering) is the bottleneck — each worker can use 10-20 GB peak.
-- **OOM risk:** if a tmux session silently disappears, it was likely killed by OOM-killer. Check `dmesg | grep -i oom` or the log file.
-
 ### Security
 
 - Do NOT commit secrets (tokens, IPs, passwords). Use environment variables.
@@ -644,9 +482,6 @@ Branch naming: `feature/<name>`, `fix/<name>`, `experiment/<name>`
 ## Technical reference
 
 ### Dev machines
-
-**CPU машина** (для data pipeline): первая (8 cores / 64 GB / 200 GB SSD) уничтожена 2026-03-15.
-Рекомендуемый конфиг: `cpu.4.8.120` (4 vCPU, 8 GB RAM, 120 GB SSD) — 2837 ₽/мес.
 
 **GPU машина** (для DL обучения): immers.cloud
 - **Конфиг:** V100-PCIE-32GB, 32GB RAM, 128GB SSD, Ubuntu 24.04 + CUDA 12.8
@@ -706,13 +541,6 @@ Used for sharing processed data and experiment artifacts between team members.
 **Current structure on Yandex.Disk:**
 ```
 orbitaal_processed/
-  node_mapping.parquet
-  daily_stats.csv
-  daily_snapshots/
-    2009-01-03.parquet ... 2021-01-25.parquet  # 4401 files
-  node_features/
-    2009-01-03.parquet ... 2021-01-25.parquet  # 4144 файлов (257 пустых дней не имеют node features)
-  graph_features.csv                           # 4401 строка
   stream_graph/
     2020-06-01__2020-08-31.parquet             # stream graph (sorted by UNIX timestamp)
     2020-06-01__2020-08-31.json                # statistics
@@ -729,9 +557,7 @@ orbitaal_processed/
     node_mapping_25.npy
     adj_25.json
   experiments/                                 # Результаты экспериментов (создаётся launcher.py)
-    exp_001_link_pred_baselines/
-    exp_002_graph_level_baselines/
-    exp_003_heuristic_baselines/
+    exp_***_<short_desc>
 ```
 
 ### Loading processed data (code snippets)
@@ -782,15 +608,6 @@ Processing 320M+ entities requires careful memory management on 64 GB RAM:
 **Snapshot columns:** SRC_ID, DST_ID, VALUE_SATOSHI, VALUE_USD
 **Stream graph columns:** SRC_ID, DST_ID, TIMESTAMP, VALUE_SATOSHI, VALUE_USD
 **Node table columns:** ID, NAME, FIRST_TIMESTAMP, LAST_TIMESTAMP, BALANCE_SATOSHI
-
----
-
-### Current decisions
-
-- **Focus on Link Prediction.** Graph-level forecasting deprioritized (2026-03-19).
-- **Stream graph pipeline ready.** `src/build_stream_graph.py` — скачивание, фильтрация,
-  маппинг. Формат: один parquet, отсортированный по UNIX timestamp. Нужен для TGN, DyGFormer и др.
-- **Processed data** полностью на Яндекс.Диске. Новая машинка качает их через API по требованию.
 
 ---
 
