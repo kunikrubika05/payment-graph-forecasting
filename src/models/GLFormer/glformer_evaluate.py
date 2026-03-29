@@ -29,7 +29,10 @@ from src.models.GLFormer.data_utils import (
     TemporalCSR,
     sample_neighbors_batch,
 )
-from src.models.GLFormer.glformer_train import _compute_cooccurrence
+from src.models.GLFormer.glformer_train import (
+    _compute_cooccurrence,
+    _compute_cn_from_adj,
+)
 from src.models.data_utils import featurize_neighbors
 from src.baselines.evaluation import compute_ranking_metrics
 from sg_baselines.sampling import sample_negatives_for_eval
@@ -76,6 +79,8 @@ def evaluate_tgb_style(
     use_amp: bool = True,
     seed: int = 42,
     max_edges: int = 50_000,
+    adj=None,
+    node_mapping=None,
 ) -> Dict[str, float]:
     """Full TGB-style evaluation matching the baseline protocol exactly.
 
@@ -187,11 +192,18 @@ def evaluate_tgb_style(
 
         cooc_counts = None
         if use_cooc:
-            src_nids_rep = np.repeat(src_nids, C, axis=0)
-            src_lens_rep = np.repeat(src_lens, C)
-            cooc_np = _compute_cooccurrence(
-                src_nids_rep, src_lens_rep, dst_nids, dst_lens
-            )
+            if adj is not None and node_mapping is not None:
+                cooc_np = _compute_cn_from_adj(
+                    adj, node_mapping,
+                    np.full(C, src_node, dtype=np.int64),
+                    all_dst.astype(np.int64),
+                )
+            else:
+                src_nids_rep = np.repeat(src_nids, C, axis=0)
+                src_lens_rep = np.repeat(src_lens, C)
+                cooc_np = _compute_cooccurrence(
+                    src_nids_rep, src_lens_rep, dst_nids, dst_lens
+                )
             cooc_counts = torch.tensor(cooc_np, dtype=torch.float32, device=device)
 
         def _t(arr, dtype=torch.float32):

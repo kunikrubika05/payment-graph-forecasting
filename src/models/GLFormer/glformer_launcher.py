@@ -183,6 +183,23 @@ def run_experiment(args):
             args.node_feat_dim = node_feats.shape[1]
         logger.info("Node features: shape=%s, dim=%d", node_feats.shape, args.node_feat_dim)
 
+    adj = None
+    node_mapping = None
+    if args.use_cooccurrence and args.adj_path:
+        from scipy import sparse as _sp
+        logger.info("Loading adjacency matrix from %s...", args.adj_path)
+        adj = _sp.load_npz(args.adj_path)
+        node_mapping = np.load(args.node_mapping_path)
+        logger.info(
+            "Adjacency: shape=%s, nnz=%d, mapping=%d nodes",
+            adj.shape, adj.nnz, len(node_mapping),
+        )
+    elif args.use_cooccurrence:
+        logger.warning(
+            "--use-cooccurrence enabled but --adj-path not provided. "
+            "Falling back to K-sampled neighbor intersection (approximate)."
+        )
+
     _save_data_summary(output_dir, data, train_mask, val_mask, test_mask)
 
     logger.info("Step 2: Training GLFormer...")
@@ -210,6 +227,8 @@ def run_experiment(args):
         node_feat_dim=args.node_feat_dim,
         use_cooccurrence=args.use_cooccurrence,
         cooc_dim=args.cooc_dim,
+        adj=adj,
+        node_mapping=node_mapping,
     )
     train_time = time.time() - train_start
 
@@ -234,6 +253,8 @@ def run_experiment(args):
         use_amp=not args.no_amp,
         seed=args.seed + 200,
         max_edges=50_000,
+        adj=adj,
+        node_mapping=node_mapping,
     )
 
     logger.info("Step 3b: TGB-style evaluation on test set (directed, baseline protocol)...")
@@ -253,6 +274,8 @@ def run_experiment(args):
         use_amp=not args.no_amp,
         seed=args.seed + 400,
         max_edges=args.max_test_edges if args.max_test_edges else 50_000,
+        adj=adj,
+        node_mapping=node_mapping,
     )
     eval_time = time.time() - eval_start
     total_time = time.time() - total_start
@@ -393,12 +416,27 @@ def main():
     parser.add_argument(
         "--use-cooccurrence", action="store_true",
         help="Enable shared-neighbor co-occurrence features in the predictor. "
-             "Requires computing neighbor set intersections per query — slower "
-             "but can improve MRR by capturing common-neighbor signal.",
+             "Use together with --adj-path for full-graph CN (recommended). "
+             "Without --adj-path falls back to K-sampled intersection (approximate).",
     )
     parser.add_argument(
         "--cooc-dim", type=int, default=16,
         help="Co-occurrence encoding dimension. Only used when --use-cooccurrence.",
+    )
+    parser.add_argument(
+        "--adj-path",
+        type=str,
+        default=None,
+        help="Path to train adjacency matrix .npz (adj_10_undirected.npz or "
+             "adj_25_undirected.npz). Required for full-graph CN computation "
+             "when --use-cooccurrence is set.",
+    )
+    parser.add_argument(
+        "--node-mapping-path",
+        type=str,
+        default=None,
+        help="Path to node_mapping .npy (node_mapping_10.npy or node_mapping_25.npy). "
+             "Required together with --adj-path.",
     )
 
     args = parser.parse_args()
