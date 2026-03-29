@@ -1,17 +1,22 @@
 """TGB-style evaluation for GLFormer temporal link prediction.
 
-Uses the same protocol as EAGLE and baselines:
+Matches the baseline protocol from sg_baselines/sampling.py exactly:
     - 50 historical + 50 random negatives per positive edge
+    - Historical: train neighbors of src, excluding ALL eval positives of src
+    - Random: from active train nodes only (not full 312M node space)
     - Per-source ranking: rank true destination among 101 candidates
+    - Rank = 1 + count(score > true_score), conservative (no fractional ties)
     - Metrics: MRR, Hits@1, Hits@3, Hits@10
+    - 50K query subsample
+    - Eval seeds: val = seed+200, test = seed+400
 
-When use_cooccurrence=True, shared-neighbor counts between src and each
-candidate destination are computed before scoring and passed to the model.
+Evaluation runs on DIRECTED edges only (not undirected duplicates).
 """
 
 import contextlib
 import logging
 import time
+from collections import defaultdict
 from typing import Dict, Optional
 
 import numpy as np
@@ -23,11 +28,11 @@ from src.models.GLFormer.data_utils import (
     TemporalEdgeData,
     TemporalCSR,
     sample_neighbors_batch,
-    generate_negatives_for_eval,
 )
 from src.models.GLFormer.glformer_train import _compute_cooccurrence
 from src.models.data_utils import featurize_neighbors
 from src.baselines.evaluation import compute_ranking_metrics
+from sg_baselines.sampling import sample_negatives_for_eval
 
 logger = logging.getLogger(__name__)
 
@@ -39,84 +44,110 @@ def _amp_autocast(enabled: bool, device_type: str):
     return contextlib.nullcontext()
 
 
+def build_eval_positives_per_src(
+    eval_src: np.ndarray,
+    eval_dst: np.ndarray,
+) -> dict[int, set[int]]:
+    """Build per-source set of ALL positive destinations in eval split.
+
+    Used to exclude eval positives from historical negatives, preventing
+    target leakage in negative sampling.
+    """
+    positives: dict[int, set[int]] = defaultdict(set)
+    for s, d in zip(eval_src, eval_dst):
+        positives[int(s)].add(int(d))
+    return dict(positives)
+
+
 @torch.no_grad()
 def evaluate_tgb_style(
     model: GLFormerTime,
     data: TemporalEdgeData,
     csr: TemporalCSR,
-    eval_mask: np.ndarray,
+    eval_src: np.ndarray,
+    eval_dst: np.ndarray,
+    eval_ts: np.ndarray,
+    train_neighbors: dict[int, set[int]],
+    active_nodes: np.ndarray,
     device: torch.device,
     num_neighbors: int = 20,
     n_hist_neg: int = 50,
     n_random_neg: int = 50,
     use_amp: bool = True,
     seed: int = 42,
-    max_edges: Optional[int] = None,
+    max_edges: int = 50_000,
 ) -> Dict[str, float]:
-    """Full TGB-style evaluation matching the baseline protocol.
+    """Full TGB-style evaluation matching the baseline protocol exactly.
 
-    For each positive edge (src, dst, t):
-        1. Generate n_hist_neg historical + n_random_neg random negatives.
-        2. Score all 1 + n_hist_neg + n_random_neg candidates.
-        3. Compute fractional rank of the true destination.
-
-    Historical negatives are nodes that src has interacted with previously
-    (excluding the true dst). Random negatives are uniformly sampled from
-    all nodes.
-
-    When model.use_cooccurrence=True, the intersection size between src's
-    recent neighbors and each candidate's recent neighbors is computed for
-    all candidates before scoring.
+    For each positive DIRECTED edge (src, dst, t):
+        1. Generate negatives via sample_negatives_for_eval (sg_baselines).
+        2. Score all 1 + n_negatives candidates using GLFormer.
+        3. Compute conservative rank (no fractional ties).
 
     Args:
         model: Trained GLFormerTime model.
-        data: Temporal edge data.
+        data: Temporal edge data (for neighbor features).
         csr: Temporal CSR built from edges preceding the evaluation period
             (train-only for val eval, train+val for test eval).
-        eval_mask: Boolean mask selecting evaluation edges.
+        eval_src: Directed source node indices for eval split.
+        eval_dst: Directed destination node indices for eval split.
+        eval_ts: Timestamps for eval edges.
+        train_neighbors: Per-source neighbor sets from DIRECTED train edges.
+        active_nodes: Sorted array of active train node indices.
         device: Torch device.
         num_neighbors: K most-recent neighbors sampled per node.
         n_hist_neg: Number of historical negatives per query.
         n_random_neg: Number of random negatives per query.
         use_amp: Enable mixed precision.
         seed: Random seed for negative sampling.
-        max_edges: If set, subsample this many edges from eval_mask
-            (random without replacement). Useful for fast evaluation
-            during development; set to None for full evaluation.
+        max_edges: Maximum queries to evaluate (subsampled if more).
 
     Returns:
         Dict with MRR, Hits@1, Hits@3, Hits@10, eval_time_sec,
         edges_per_sec, and n_queries.
     """
     model.eval()
-    rng = np.random.default_rng(seed)
+    rng = np.random.RandomState(seed)
     amp_enabled = use_amp and device.type == "cuda"
     K = num_neighbors
+    n_negatives = n_hist_neg + n_random_neg
     use_edge_feats = model.edge_feat_dim > 0
     use_node_feats = model.node_feat_dim > 0
     use_cooc = model.use_cooccurrence
 
-    eval_indices = np.where(eval_mask)[0]
-    if max_edges is not None and max_edges < len(eval_indices):
-        eval_indices = rng.choice(eval_indices, size=max_edges, replace=False)
-        eval_indices.sort()
-    n_total = len(eval_indices)
+    n_total_edges = len(eval_src)
+    eval_positives_per_src = build_eval_positives_per_src(eval_src, eval_dst)
+
+    if n_total_edges > max_edges:
+        chosen = rng.choice(n_total_edges, size=max_edges, replace=False)
+        chosen.sort()
+    else:
+        chosen = np.arange(n_total_edges)
+
+    n_queries = len(chosen)
     logger.info(
-        "GLFormer TGB-style eval: %d edges, %d negatives each",
-        n_total, n_hist_neg + n_random_neg,
+        "GLFormer TGB-style eval: %d/%d edges, %d negatives each (seed=%d)",
+        n_queries, n_total_edges, n_negatives, seed,
     )
 
     all_ranks = []
     start_time = time.time()
 
-    for idx in tqdm(eval_indices, desc="Evaluating"):
-        src_node = data.src[idx]
-        true_dst = data.dst[idx]
-        ts = data.timestamps[idx]
+    for i in tqdm(chosen, desc="Evaluating"):
+        src_node = int(eval_src[i])
+        true_dst = int(eval_dst[i])
+        ts = float(eval_ts[i])
 
-        neg_nodes = generate_negatives_for_eval(
-            src_node, true_dst, ts, csr, data.num_nodes,
-            n_hist=n_hist_neg, n_random=n_random_neg, rng=rng,
+        src_positives = eval_positives_per_src.get(src_node, set())
+
+        neg_nodes = sample_negatives_for_eval(
+            src=src_node,
+            dst_true=true_dst,
+            train_neighbors=train_neighbors,
+            eval_positives_of_src=src_positives,
+            active_nodes=active_nodes,
+            n_negatives=n_negatives,
+            rng=rng,
         )
         all_dst = np.concatenate([[true_dst], neg_nodes]).astype(np.int32)
         C = len(all_dst)
@@ -188,22 +219,19 @@ def evaluate_tgb_style(
             ).cpu().float().numpy()
 
         true_score = scores[0]
-        rank = (
-            1.0
-            + (scores[1:] > true_score).sum()
-            + 0.5 * (scores[1:] == true_score).sum()
-        )
+        rank = 1.0 + (scores[1:] > true_score).sum()
         all_ranks.append(float(rank))
 
     elapsed = time.time() - start_time
     ranks_arr = np.array(all_ranks, dtype=np.float64)
     metrics = compute_ranking_metrics(ranks_arr)
     metrics["eval_time_sec"] = elapsed
-    metrics["edges_per_sec"] = n_total / elapsed if elapsed > 0 else 0.0
+    metrics["edges_per_sec"] = n_queries / elapsed if elapsed > 0 else 0.0
 
     logger.info(
-        "GLFormer eval: MRR=%.4f Hits@1=%.3f Hits@3=%.3f Hits@10=%.3f (%.1fs)",
+        "GLFormer eval: MRR=%.4f Hits@1=%.3f Hits@3=%.3f Hits@10=%.3f "
+        "(%d queries, %.1fs)",
         metrics["mrr"], metrics["hits@1"], metrics["hits@3"],
-        metrics["hits@10"], elapsed,
+        metrics["hits@10"], n_queries, elapsed,
     )
     return metrics
