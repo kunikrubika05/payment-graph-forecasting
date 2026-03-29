@@ -92,12 +92,25 @@ def evaluate_heuristics(
     unique_edges = pd.DataFrame({"src": src_all, "dst": dst_all}).drop_duplicates()
     src_unique = unique_edges["src"].values.astype(np.int64)
     dst_unique = unique_edges["dst"].values.astype(np.int64)
-    n_total = len(src_unique)
+    n_before_filter = len(src_unique)
+
+    train_node_set = set(node_mapping.tolist())
+    keep = np.array([
+        int(s) in train_node_set and int(d) in train_node_set
+        for s, d in zip(src_unique, dst_unique)
+    ], dtype=bool)
+    src_unique = src_unique[keep]
+    dst_unique = dst_unique[keep]
+    n_after_filter = len(src_unique)
+    n_filtered = n_before_filter - n_after_filter
+    print(f"  [{split_name}] Filtered out {n_filtered:,} queries with unknown nodes "
+          f"({n_before_filter:,} -> {n_after_filter:,})", flush=True)
 
     all_positives_per_src: dict[int, set[int]] = {}
     for s, d in zip(src_unique, dst_unique):
         all_positives_per_src.setdefault(int(s), set()).add(int(d))
 
+    n_total = len(src_unique)
     if n_total > max_queries:
         rng_sub = np.random.RandomState(seed + 777)
         idx = rng_sub.choice(n_total, size=max_queries, replace=False)
