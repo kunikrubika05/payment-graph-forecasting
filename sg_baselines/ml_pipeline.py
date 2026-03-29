@@ -76,7 +76,7 @@ def prepare_training_data(
     X = np.empty((n_total, N_TOTAL_FEATURES), dtype=np.float32)
 
     for start in tqdm(range(0, n_total, batch_size),
-                      desc="  features", miniinterval=5.0):
+                      desc="  features"):
         end = min(start + batch_size, n_total)
         X[start:end] = build_pair_features(
             all_src[start:end], all_dst[start:end],
@@ -258,7 +258,7 @@ def _prebuild_eval_candidates(
     batch_size = 200_000
     X = np.empty((total_pairs, N_TOTAL_FEATURES), dtype=np.float32)
     for start in tqdm(range(0, total_pairs, batch_size),
-                      desc=f"  eval_features({n_queries}q)", miniinterval=5.0):
+                      desc=f"  eval_features({n_queries}q)"):
         end = min(start + batch_size, total_pairs)
         X[start:end] = build_pair_features(
             all_src_arr[start:end], all_dst_arr[start:end],

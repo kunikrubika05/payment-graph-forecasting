@@ -118,7 +118,7 @@ def evaluate_heuristics(
     all_dst_flat = []
     query_offsets = [0]
 
-    for i in tqdm(range(n_queries), desc=f"  neg_sample_{split_name}", miniinterval=5.0):
+    for i in tqdm(range(n_queries), desc=f"  neg_sample_{split_name}"):
         s = int(src_unique[i])
         d_true = int(dst_unique[i])
         negatives = sample_negatives_for_eval(
