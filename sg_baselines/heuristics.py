@@ -94,6 +94,10 @@ def evaluate_heuristics(
     dst_unique = unique_edges["dst"].values.astype(np.int64)
     n_total = len(src_unique)
 
+    all_positives_per_src: dict[int, set[int]] = {}
+    for s, d in zip(src_unique, dst_unique):
+        all_positives_per_src.setdefault(int(s), set()).add(int(d))
+
     if n_total > max_queries:
         rng_sub = np.random.RandomState(seed + 777)
         idx = rng_sub.choice(n_total, size=max_queries, replace=False)
@@ -105,10 +109,6 @@ def evaluate_heuristics(
 
     n_queries = len(src_unique)
     print(f"  [{split_name}] {n_queries:,} queries for ranking", flush=True)
-
-    positives_per_src: dict[int, set[int]] = {}
-    for s, d in zip(src_unique, dst_unique):
-        positives_per_src.setdefault(int(s), set()).add(int(d))
 
     print(f"  [{split_name}] Sampling negatives...", flush=True)
     t0 = time.time()
@@ -122,7 +122,7 @@ def evaluate_heuristics(
         s = int(src_unique[i])
         d_true = int(dst_unique[i])
         negatives = sample_negatives_for_eval(
-            s, d_true, train_neighbors, positives_per_src.get(s, set()),
+            s, d_true, train_neighbors, all_positives_per_src.get(s, set()),
             active_nodes, n_negatives, rng,
         )
         candidates = np.concatenate([[d_true], negatives])
