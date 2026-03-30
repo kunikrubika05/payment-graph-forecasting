@@ -1,20 +1,29 @@
-"""Build C++ and CUDA extensions for accelerated temporal neighbor sampling.
+"""Build C++ and CUDA extensions for temporal sampling and graph metrics.
 
 Usage:
     cd payment-graph-forecasting
     source venv/bin/activate
 
-    # Build C++ only (CPU)
+    # Temporal sampling — C++ only (CPU)
     python src/models/build_ext.py
 
-    # Build CUDA extension (requires NVCC)
+    # Temporal sampling — CUDA (requires NVCC)
     python src/models/build_ext.py --cuda
 
-    # Build both
+    # Temporal sampling — both
     python src/models/build_ext.py --all
 
+    # Common neighbors — C++ only
+    python src/models/build_ext.py --graph-metrics
+
+    # Common neighbors — CUDA
+    python src/models/build_ext.py --graph-metrics-cuda
+
+    # Everything at once
+    python src/models/build_ext.py --all --graph-metrics --graph-metrics-cuda
+
 After building, extensions are cached and loaded automatically
-by temporal_graph_sampler.py and data_utils.py on subsequent imports.
+by temporal_graph_sampler.py, data_utils.py, and graph_metrics.py.
 """
 
 import argparse
@@ -73,14 +82,65 @@ def build_cuda():
     return module
 
 
+def build_graph_metrics_cpp():
+    """Compile the graph_metrics_cpp (CPU) extension for common neighbors."""
+    from torch.utils.cpp_extension import load
+
+    src_dir = os.path.dirname(os.path.abspath(__file__))
+    cpp_file = os.path.join(src_dir, "csrc", "graph_metrics.cpp")
+    build_dir = os.path.join(src_dir, "csrc", "build_gm")
+    os.makedirs(build_dir, exist_ok=True)
+
+    print(f"Compiling graph_metrics C++ extension from {cpp_file}...")
+    module = load(
+        name="graph_metrics_cpp",
+        sources=[cpp_file],
+        build_directory=build_dir,
+        extra_cflags=["-O3"],
+        verbose=True,
+    )
+    print("graph_metrics C++ extension built successfully!")
+    return module
+
+
+def build_graph_metrics_cuda():
+    """Compile the graph_metrics_cuda (GPU) extension for common neighbors."""
+    import torch
+    if not torch.cuda.is_available():
+        print("WARNING: CUDA not available on this machine.")
+        print("Building anyway (for cross-compilation or later use)...")
+
+    from torch.utils.cpp_extension import load
+
+    src_dir = os.path.dirname(os.path.abspath(__file__))
+    cu_file = os.path.join(src_dir, "csrc", "graph_metrics.cu")
+    build_dir = os.path.join(src_dir, "csrc", "build_gm_cuda")
+    os.makedirs(build_dir, exist_ok=True)
+
+    print(f"Compiling graph_metrics CUDA extension from {cu_file}...")
+    module = load(
+        name="graph_metrics_cuda",
+        sources=[cu_file],
+        build_directory=build_dir,
+        extra_cuda_cflags=["-O3"],
+        verbose=True,
+    )
+    print("graph_metrics CUDA extension built successfully!")
+    return module
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Build C++/CUDA extensions for temporal sampling"
+        description="Build C++/CUDA extensions for temporal sampling and graph metrics"
     )
     parser.add_argument("--cuda", action="store_true",
-                        help="Build CUDA extension")
+                        help="Build temporal sampling CUDA extension")
     parser.add_argument("--all", action="store_true",
-                        help="Build both C++ and CUDA extensions")
+                        help="Build both temporal sampling C++ and CUDA extensions")
+    parser.add_argument("--graph-metrics", action="store_true",
+                        help="Build graph_metrics C++ extension (common neighbors)")
+    parser.add_argument("--graph-metrics-cuda", action="store_true",
+                        help="Build graph_metrics CUDA extension (common neighbors)")
     args = parser.parse_args()
 
     if args.all:
@@ -89,5 +149,13 @@ if __name__ == "__main__":
         build_cuda()
     elif args.cuda:
         build_cuda()
-    else:
+    elif not args.graph_metrics and not args.graph_metrics_cuda:
         build_cpp()
+
+    if args.graph_metrics:
+        print()
+        build_graph_metrics_cpp()
+
+    if args.graph_metrics_cuda:
+        print()
+        build_graph_metrics_cuda()
