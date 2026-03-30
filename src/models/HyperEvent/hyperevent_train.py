@@ -312,7 +312,7 @@ def compute_batch_relational_vectors(
 
 def _amp_autocast(enabled: bool, device_type: str):
     if enabled and device_type == "cuda":
-        return torch.cuda.amp.autocast()
+        return torch.amp.autocast("cuda")
     return contextlib.nullcontext()
 
 
@@ -619,7 +619,7 @@ def train_hyperevent(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
     amp_enabled = use_amp and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
     train_indices = np.where(train_mask)[0]  # already sorted chronologically
     val_indices = np.where(val_mask)[0]

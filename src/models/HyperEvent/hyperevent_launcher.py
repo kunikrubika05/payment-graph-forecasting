@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -109,11 +110,24 @@ def run_experiment(args):
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         undirected=True,
+        fraction=args.fraction,
     )
     data_time = time.time() - data_start
     logger.info("Data: %s (%.1f sec)", data, data_time)
 
     _save_data_summary(output_dir, data, train_mask, val_mask, test_mask)
+
+    logger.info("Step 1b: Building active_nodes and all_positives_per_src...")
+    train_indices = np.where(train_mask)[0]
+    active_nodes = np.unique(
+        np.concatenate([data.src[train_indices], data.dst[train_indices]])
+    ).astype(np.int32)
+    logger.info("Train node pool (active_nodes): %d nodes", len(active_nodes))
+
+    all_positives_per_src: dict = defaultdict(set)
+    for s, d in zip(data.src.tolist(), data.dst.tolist()):
+        all_positives_per_src[s].add(d)
+    logger.info("all_positives_per_src built for %d source nodes", len(all_positives_per_src))
 
     logger.info("Step 2: Training HyperEvent...")
     train_start = time.time()
@@ -157,7 +171,10 @@ def run_experiment(args):
         n_hist_neg=50,
         n_random_neg=50,
         use_amp=not args.no_amp,
-        seed=args.seed,
+        seed=42 + 400,
+        active_nodes=active_nodes,
+        all_positives_per_src=all_positives_per_src,
+        max_eval_edges=args.max_test_edges if args.max_test_edges > 0 else None,
     )
     eval_time = time.time() - eval_start
     total_time = time.time() - total_start
@@ -198,6 +215,10 @@ def run_experiment(args):
     logger.info("  Test Hits@3:  %.4f", test_metrics["hits@3"])
     logger.info("  Test Hits@10: %.4f", test_metrics["hits@10"])
     logger.info(
+        "  Test queries: %d scored, %d filtered (new nodes)",
+        test_metrics.get("n_queries", 0), test_metrics.get("n_filtered", 0),
+    )
+    logger.info(
         "  Best val MRR: %.4f (epoch %d)",
         final_results["best_val_mrr"],
         final_results["best_epoch"],
@@ -232,6 +253,10 @@ def main():
     )
     parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--val-ratio", type=float, default=0.15)
+    parser.add_argument(
+        "--fraction", type=float, default=None,
+        help="Take only first fraction of parquet edges (e.g. 0.10 for period_10).",
+    )
     parser.add_argument("--output", type=str, default="/tmp/hyperevent_results")
 
     parser.add_argument("--epochs", type=int, default=50)
@@ -263,6 +288,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--max-val-edges", type=int, default=5000)
+    parser.add_argument(
+        "--max-test-edges", type=int, default=50_000,
+        help="Maximum test queries to score. 0 means evaluate all.",
+    )
 
     args = parser.parse_args()
     run_experiment(args)
