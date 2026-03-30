@@ -89,8 +89,16 @@ def train_epoch(
     loss_fn: Callable,
     device: torch.device,
     grad_clip: float,
+    k_neg_sample: int = 0,
 ) -> float:
-    """Run one training epoch. Returns mean loss."""
+    """Run one training epoch. Returns mean loss.
+
+    Args:
+        k_neg_sample: If > 0, randomly subsample this many negatives per
+                      positive each batch (out of the precomputed K).
+                      Prevents overfitting to fixed negatives across epochs.
+                      0 = use all K negatives (original behaviour).
+    """
     model.train()
     total_loss = 0.0
     n_batches  = 0
@@ -99,6 +107,11 @@ def train_epoch(
         pos_feat = pos_feat.to(device)           # (B, n_feat)
         neg_feat = neg_feat.to(device)           # (B, K, n_feat)
         B, K, F = neg_feat.shape
+
+        if k_neg_sample > 0 and k_neg_sample < K:
+            perm = torch.randperm(K, device=device)[:k_neg_sample]
+            neg_feat = neg_feat[:, perm, :]
+            K = k_neg_sample
 
         score_pos  = model(pos_feat)             # (B,)
         scores_neg = model(neg_feat.view(B * K, F)).view(B, K)  # (B, K)
@@ -173,13 +186,19 @@ def train(
 
     print(f"\nTraining PairMLP ({cfg.loss.upper()} loss) for up to {cfg.n_epochs} epochs")
     print(f"  Features ({cfg.n_input_features}): {cfg.selected_feature_names}")
-    print(f"  Dataset: {len(dataset):,} positive edges, K={dataset.neg.shape[1]} neg")
+    K_total  = dataset.neg.shape[1]
+    K_active = cfg.k_neg_sample if cfg.k_neg_sample > 0 else K_total
+    print(f"  Dataset: {len(dataset):,} positive edges, K={K_total} neg"
+          + (f" (sampling {K_active}/epoch)" if K_active < K_total else ""))
     print(f"  Batches/epoch: {len(loader):,}, batch_size={cfg.batch_size}")
     print(f"  patience={cfg.patience} (eval every {eval_every} epochs)")
 
     for epoch in range(1, cfg.n_epochs + 1):
         t0   = time.time()
-        loss = train_epoch(model, loader, optimizer, loss_fn, device, cfg.grad_clip)
+        loss = train_epoch(
+            model, loader, optimizer, loss_fn, device, cfg.grad_clip,
+            k_neg_sample=cfg.k_neg_sample,
+        )
         history["train_loss"].append(loss)
         ep_time = time.time() - t0
 

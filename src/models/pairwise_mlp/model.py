@@ -25,12 +25,14 @@ class PairMLP(nn.Module):
     Args:
         n_features:   Input dimensionality (default: N_FEATURES=7).
         hidden_dims:  Sequence of hidden layer widths (default: [64, 32]).
+        dropout:      Dropout rate applied after each hidden ReLU (0 = off).
     """
 
     def __init__(
         self,
         n_features: int = N_FEATURES,
         hidden_dims: list[int] | None = None,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         if hidden_dims is None:
@@ -43,6 +45,8 @@ class PairMLP(nn.Module):
         for h in hidden_dims:
             layers.append(nn.Linear(in_dim, h))
             layers.append(nn.ReLU(inplace=True))
+            if dropout > 0:
+                layers.append(nn.Dropout(p=dropout))
             in_dim = h
         layers.append(nn.Linear(in_dim, 1))
 
@@ -80,6 +84,7 @@ class PairMLP(nn.Module):
 def build_model(
     hidden_dims: list[int] | None = None,
     n_features: int = N_FEATURES,
+    dropout: float = 0.0,
 ) -> PairMLP:
     """Construct a PairMLP from config parameters."""
-    return PairMLP(n_features=n_features, hidden_dims=hidden_dims)
+    return PairMLP(n_features=n_features, hidden_dims=hidden_dims, dropout=dropout)

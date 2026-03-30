@@ -142,13 +142,16 @@ class PairMLPConfig:
     loss: str = "bpr"  # "bpr" or "bce"
 
     # --- Training (GPU) ---
-    hidden_dims:  List[int] = field(default_factory=lambda: [64, 32])
-    lr:           float     = 1e-3
-    weight_decay: float     = 1e-4
-    batch_size:   int       = 4096
-    n_epochs:     int       = 50
-    patience:     int       = 10
-    grad_clip:    float     = 1.0
+    hidden_dims:   List[int] = field(default_factory=lambda: [64, 32])
+    dropout:       float     = 0.0   # dropout rate after each hidden ReLU (0 = off)
+    lr:            float     = 1e-3
+    weight_decay:  float     = 1e-4
+    batch_size:    int       = 4096
+    n_epochs:      int       = 50
+    patience:      int       = 10
+    grad_clip:     float     = 1.0
+    eval_every:    int       = 2     # epochs between val evaluations
+    k_neg_sample:  int       = 0     # subsample K' negatives per step (0 = use all K)
 
     # --- Eval (identical to sg_baselines) ---
     n_negatives:    int = 100
@@ -236,6 +239,7 @@ class PairMLPConfig:
             "selected_feature_names": self.selected_feature_names,
             "n_input_features":       self.n_input_features,
             "hidden_dims":            self.hidden_dims,
+            "dropout":                self.dropout,
             "lr":                     self.lr,
             "weight_decay":           self.weight_decay,
             "batch_size":             self.batch_size,

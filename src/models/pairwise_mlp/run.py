@@ -67,7 +67,7 @@ from src.models.pairwise_mlp.config import (
     resolve_feature_indices,
 )
 from src.models.pairwise_mlp.dataset import load_dataset
-from src.models.pairwise_mlp.evaluate import evaluate_split
+from src.models.pairwise_mlp.evaluate import build_eval_cache, evaluate_split
 from src.models.pairwise_mlp.features import (
     precompute_degrees,
     precompute_aa_weights,
@@ -206,14 +206,16 @@ def run_experiment(cfg: PairMLPConfig, token: str) -> None:
     model = build_model(
         hidden_dims=cfg.hidden_dims,
         n_features=cfg.n_input_features,
+        dropout=cfg.dropout,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  PairMLP: {n_params:,} parameters", flush=True)
 
     # ------------------------------------------------------------------
-    # [5] Build eval closure
+    # [5] Build eval caches (one-time CPU cost; eval during training is then
+    #     just a fast GPU forward pass).
     # ------------------------------------------------------------------
-    eval_kwargs = dict(
+    cache_kwargs = dict(
         train_neighbors=train_neighbors,
         node_mapping=node_mapping,
         adj_undir=adj_undir,
@@ -221,34 +223,38 @@ def run_experiment(cfg: PairMLPConfig, token: str) -> None:
         deg_undir=deg_undir,
         w_undir=w_undir,
         w_dir=w_dir,
-        device=device,
         n_negatives=cfg.n_negatives,
         max_queries=cfg.max_eval_queries,
         active_feature_indices=cfg.active_feature_indices or None,
     )
 
+    print("\n[5/6] Building eval feature caches...", flush=True)
+    val_cache  = build_eval_cache(
+        val_edges,  seed=cfg.val_seed,  split_name="val",  **cache_kwargs)
+    test_cache = build_eval_cache(
+        test_edges, seed=cfg.test_seed, split_name="test", **cache_kwargs)
+
     def eval_fn(mdl, split: str) -> dict:
-        edges = val_edges if split == "val" else test_edges
-        seed  = cfg.val_seed if split == "val" else cfg.test_seed
+        cache = val_cache if split == "val" else test_cache
         return evaluate_split(
-            model=mdl, eval_edges=edges, seed=seed,
-            split_name=split, **eval_kwargs,
+            model=mdl, device=device,
+            eval_cache=cache, split_name=split,
         )
 
     # ------------------------------------------------------------------
     # [6] Train
     # ------------------------------------------------------------------
-    print(f"\n[5/6] Training ({cfg.loss.upper()} loss)...", flush=True)
+    print(f"\n[6/7] Training ({cfg.loss.upper()} loss)...", flush=True)
     history = train(
         model=model, dataset=dataset, cfg=cfg,
         device=device, eval_fn=eval_fn,
-        output_dir=out_dir, eval_every=2,
+        output_dir=out_dir, eval_every=cfg.eval_every,
     )
 
     # ------------------------------------------------------------------
     # [7] Final eval with best checkpoint
     # ------------------------------------------------------------------
-    print("\n[6/6] Final evaluation (best checkpoint)...", flush=True)
+    print("\n[7/7] Final evaluation (best checkpoint)...", flush=True)
     ckpt = torch.load(history["ckpt_path"], map_location=device)
     model.load_state_dict(ckpt["model_state"])
     print(f"  Best epoch={ckpt['epoch']}, val_MRR={ckpt['val_mrr']:.4f}",
@@ -353,6 +359,8 @@ Examples:
     # Architecture
     parser.add_argument("--hidden", nargs="+", type=int, default=[64, 32],
                         metavar="DIM", help="Hidden layer widths (default: 64 32)")
+    parser.add_argument("--dropout", type=float, default=0.0,
+                        help="Dropout rate after each hidden ReLU (default: 0 = off)")
 
     # Training
     parser.add_argument("--lr",         type=float, default=1e-3)
@@ -360,6 +368,11 @@ Examples:
     parser.add_argument("--patience",   type=int,   default=10)
     parser.add_argument("--batch-size", type=int,   default=4096)
     parser.add_argument("--seed",       type=int,   default=42)
+    parser.add_argument("--eval-every",   type=int, default=2,
+                        help="Epochs between val evaluations (default: 2)")
+    parser.add_argument("--k-neg-sample", type=int, default=10,
+                        help="Negatives per step subsampled from precomputed K "
+                             "(0 = use all K; default: 10 to prevent neg overfitting)")
 
     # Experiment tag for output naming
     parser.add_argument("--exp-tag", default="",
@@ -392,10 +405,13 @@ Examples:
         loss=args.loss,
         active_feature_indices=active_indices,
         hidden_dims=args.hidden,
+        dropout=args.dropout,
         lr=args.lr,
         n_epochs=args.epochs,
         patience=args.patience,
         batch_size=args.batch_size,
+        eval_every=args.eval_every,
+        k_neg_sample=args.k_neg_sample,
         exp_tag=args.exp_tag,
         local_data_dir=args.data_dir,
         local_precompute_dir=precompute_base,
