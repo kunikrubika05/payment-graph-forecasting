@@ -1,10 +1,11 @@
 """Training loop for GraphMixer on stream graph data.
 
 Key differences from src/models/train.py:
-- Hard negative sampling: 50% historical + 50% random (matches eval distribution)
+- Hard negative sampling: 1 neg per positive, ~50% historical + ~50% random
 - Negatives sampled from TRAIN NODES only (not all nodes)
 - Split is 70/15/15 from stream graph period
-- Optimized: encode src ONCE per batch, batch all neg dst in one encode call
+- Vectorized neg sampling (no Python per-edge loop)
+- encode_node called 3x per batch: src, pos_dst, neg_dst (each batch_size)
 - Edge features normalized with log1p to prevent gradient issues
 - Early stopping uses TGB-style eval from evaluate.py
 """
@@ -56,63 +57,33 @@ def build_train_neighbors_dense(
     return result
 
 
-def _sample_hard_negatives_batch(
+def _sample_hard_negatives_vectorized(
     src_dense: np.ndarray,
     dst_dense: np.ndarray,
     train_neighbors_dense: dict[int, np.ndarray],
     active_nodes_dense: np.ndarray,
-    neg_per_positive: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Sample negatives per edge: ~50% historical neighbors + ~50% random.
+    """Sample 1 hard negative per edge: ~50% historical neighbor, ~50% random.
 
-    For each positive (src, dst), tries to fill half the negatives from
-    src's historical train neighbors (excluding dst), rest from random
-    train nodes. This matches eval distribution where negatives include
-    actual past contacts of src.
+    Vectorized: random negatives bulk-generated, historical selected with
+    minimal per-edge work (only for ~50% of edges). Matches eval distribution
+    where ~50% of negatives are past contacts of src.
     """
     batch_size = len(src_dense)
-    n_hist_target = neg_per_positive // 2
     n_active = len(active_nodes_dense)
 
-    rand_pool = active_nodes_dense[
-        rng.integers(0, n_active, size=(batch_size, neg_per_positive * 4))
-    ]
+    neg = active_nodes_dense[rng.integers(0, n_active, size=batch_size)].copy()
 
-    neg_dst = np.zeros((batch_size, neg_per_positive), dtype=np.int32)
+    use_hist = rng.random(batch_size) < 0.5
+    hist_indices = np.where(use_hist)[0]
 
-    for i in range(batch_size):
-        s = int(src_dense[i])
-        d = int(dst_dense[i])
-
-        hist_arr = train_neighbors_dense.get(s)
-        chosen = []
-
+    for i in hist_indices:
+        hist_arr = train_neighbors_dense.get(int(src_dense[i]))
         if hist_arr is not None and len(hist_arr) > 0:
-            mask = (hist_arr != d) & (hist_arr != s)
-            filtered = hist_arr[mask]
-            n_hist = min(n_hist_target, len(filtered))
-            if n_hist > 0:
-                idx = rng.choice(len(filtered), size=n_hist, replace=False)
-                chosen.extend(filtered[idx].tolist())
+            neg[i] = hist_arr[rng.integers(0, len(hist_arr))]
 
-        exclude = {s, d}
-        exclude.update(chosen)
-
-        for c in rand_pool[i]:
-            if len(chosen) >= neg_per_positive:
-                break
-            c_int = int(c)
-            if c_int not in exclude:
-                chosen.append(c_int)
-                exclude.add(c_int)
-
-        while len(chosen) < neg_per_positive:
-            chosen.append(int(active_nodes_dense[rng.integers(0, n_active)]))
-
-        neg_dst[i] = chosen[:neg_per_positive]
-
-    return neg_dst
+    return neg
 
 
 def _sample_and_featurize(data, csr, nodes, ts_arr, num_neighbors):
@@ -144,17 +115,14 @@ def train_epoch(
     train_neighbors_dense: dict[int, np.ndarray],
     batch_size: int = 4000,
     num_neighbors: int = 30,
-    neg_per_positive: int = 5,
     rng: np.random.Generator = None,
 ) -> Dict[str, float]:
-    """Run one training epoch with hard negative sampling.
+    """Run one training epoch with hard negative sampling (1 neg per positive).
 
-    Optimizations vs naive approach:
-    - encode_node(src) computed ONCE, reused for pos + all neg classifications
-    - All neg_dst encoded in ONE batched call (not neg_per_positive separate calls)
-    - Random pool pre-generated per batch to reduce Python overhead
-
-    This reduces encode_node calls from 2*(1+neg_per_positive) to 3 per batch.
+    Optimizations:
+    - encode_node(src) computed ONCE, reused for pos and neg classification
+    - neg=1: encode 3*batch_size nodes total (src + pos_dst + neg_dst)
+    - Vectorized hard negative sampling (no Python per-edge loop)
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -178,9 +146,8 @@ def train_epoch(
         dst = data.dst[batch_idx]
         ts = data.timestamps[batch_idx]
 
-        neg_dst = _sample_hard_negatives_batch(
-            src, dst, train_neighbors_dense, active_nodes_dense,
-            neg_per_positive, rng,
+        neg = _sample_hard_negatives_vectorized(
+            src, dst, train_neighbors_dense, active_nodes_dense, rng,
         )
 
         src_nf, src_nnf, src_nef, src_nrt, src_len = _sample_and_featurize(
@@ -189,11 +156,8 @@ def train_epoch(
         dst_nf, dst_nnf, dst_nef, dst_nrt, dst_len = _sample_and_featurize(
             data, csr, dst, ts, num_neighbors
         )
-
-        neg_flat = neg_dst.reshape(-1)
-        neg_ts = np.repeat(ts, neg_per_positive)
         neg_nf, neg_nnf, neg_nef, neg_nrt, neg_len = _sample_and_featurize(
-            data, csr, neg_flat, neg_ts, num_neighbors
+            data, csr, neg, ts, num_neighbors
         )
 
         h_src = model.encode_node(
@@ -221,14 +185,12 @@ def train_epoch(
         )
 
         pos_logits = model.link_classifier(h_src, h_pos_dst)
-
-        h_src_expanded = h_src.repeat_interleave(neg_per_positive, dim=0)
-        neg_logits = model.link_classifier(h_src_expanded, h_neg_dst)
+        neg_logits = model.link_classifier(h_src, h_neg_dst)
 
         all_logits = torch.cat([pos_logits, neg_logits])
         all_labels = torch.cat([
             torch.ones(actual_batch, device=device),
-            torch.zeros(actual_batch * neg_per_positive, device=device),
+            torch.zeros(actual_batch, device=device),
         ])
 
         loss = criterion(all_logits, all_labels)
@@ -267,7 +229,6 @@ def train_graphmixer(
     seed: int = 42,
     max_val_queries: int = 10_000,
     n_negatives: int = 100,
-    neg_per_positive: int = 5,
 ) -> Tuple[GraphMixer, Dict]:
     """Full training pipeline for GraphMixer on stream graph.
 
@@ -292,7 +253,6 @@ def train_graphmixer(
         seed: Random seed.
         max_val_queries: Max val queries per epoch (10K for speed).
         n_negatives: Number of negatives for eval (100 per TGB).
-        neg_per_positive: Training negatives per positive (default 5).
 
     Returns:
         Tuple of (trained model, training history dict).
@@ -369,7 +329,7 @@ def train_graphmixer(
         "num_epochs": num_epochs,
         "patience": patience,
         "seed": seed,
-        "neg_per_positive": neg_per_positive,
+        "neg_per_positive": 1,
         "num_nodes": data.num_nodes,
         "num_edges": data.num_edges,
         "total_params": total_params,
@@ -383,7 +343,7 @@ def train_graphmixer(
 
     print(f"\n  Starting training: {num_epochs} epochs max, "
           f"{train_mask.sum():,} train edges, patience={patience}", flush=True)
-    print(f"  Training negatives: {neg_per_positive} per positive (50% hist + 50% rand)",
+    print(f"  Training negatives: 1 per positive (50% hist + 50% rand, vectorized)",
           flush=True)
     print(f"  Val eval: {max_val_queries:,} queries, "
           f"{n_negatives} negatives each\n", flush=True)
@@ -396,7 +356,7 @@ def train_graphmixer(
             active_nodes_dense=active_nodes_dense,
             train_neighbors_dense=train_neighbors_dense,
             batch_size=batch_size, num_neighbors=num_neighbors,
-            neg_per_positive=neg_per_positive, rng=rng,
+            rng=rng,
         )
 
         val_metrics = evaluate_tgb_style(
