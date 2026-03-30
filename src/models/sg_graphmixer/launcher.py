@@ -52,7 +52,6 @@ def main():
     parser.add_argument("--batch-size", type=int, default=4000)
     parser.add_argument("--num-epochs", type=int, default=100)
     parser.add_argument("--patience", type=int, default=20)
-    parser.add_argument("--neg-per-positive", type=int, default=1)
     parser.add_argument("--max-val-queries", type=int, default=10_000,
                         help="Val queries per epoch for early stopping (10K for speed)")
     parser.add_argument("--max-test-queries", type=int, default=50_000,
@@ -147,7 +146,6 @@ def main():
         seed=args.seed,
         max_val_queries=args.max_val_queries,
         n_negatives=args.n_negatives,
-        neg_per_positive=args.neg_per_positive,
     )
 
     print("\n[6/7] Final evaluation...", flush=True)
@@ -204,7 +202,7 @@ def main():
             "weight_decay": args.weight_decay,
             "dropout": args.dropout,
             "batch_size": args.batch_size,
-            "neg_per_positive": args.neg_per_positive,
+            "neg_per_positive": 1,
         },
         "training": {
             "best_epoch": history.get("val_mrr", [0]).index(max(history.get("val_mrr", [0]))) + 1,
