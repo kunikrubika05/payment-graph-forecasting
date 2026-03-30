@@ -58,7 +58,7 @@ from src.models.pairwise_mlp.config import (
 from src.models.pairwise_mlp.features import (
     precompute_degrees,
     precompute_aa_weights,
-    compute_features_parallel,
+    compute_features_batch,
     verify_features,
 )
 from src.yadisk_utils import (
@@ -293,37 +293,42 @@ def run_precompute(cfg: PairMLPConfig, token: str) -> None:
     # [5] Precompute degrees and AA weights (once, reused for all batches)
     # ------------------------------------------------------------------
     print("\n[5/6] Computing features...", flush=True)
+    # Ensure CSR canonical form before indexing (avoids in-place modification
+    # that could cause crashes during fancy row indexing).
+    adj_undir.sort_indices()
+    adj_dir.sort_indices()
     deg_undir, deg_dir = precompute_degrees(adj_undir, adj_dir)
     w_undir, w_dir = precompute_aa_weights(adj_undir, deg_undir, adj_dir, deg_dir)
 
     # --- Positive features ---
     print("  Positive edges...", flush=True)
     t0 = time.time()
-    pos_features = compute_features_parallel(
+    pos_features = compute_features_batch(
         train_src, train_dst,
         node_mapping, adj_undir, adj_dir,
         deg_undir, w_undir, w_dir,
         batch_size=cfg.precompute_batch,
-        n_jobs=cfg.n_jobs,
     )
     verify_features(pos_features, label="pos")
     print(f"  pos_features: {pos_features.shape} ({time.time()-t0:.1f}s)", flush=True)
 
     # --- Negative features ---
+    # Process in a single sequential pass to avoid threading/joblib issues
+    # with scipy CSR fancy indexing (race condition in sort_indices).
     print("  Negative edges...", flush=True)
     t0 = time.time()
     neg_src_flat = np.repeat(train_src, cfg.k_neg_train)  # (N_train * K,)
     neg_dst_flat = neg_dst.ravel()                         # (N_train * K,)
-    neg_features_flat = compute_features_parallel(
+    neg_features_flat = compute_features_batch(
         neg_src_flat, neg_dst_flat,
         node_mapping, adj_undir, adj_dir,
         deg_undir, w_undir, w_dir,
         batch_size=cfg.precompute_batch,
-        n_jobs=cfg.n_jobs,
     )
+    del neg_src_flat, neg_dst_flat
     verify_features(neg_features_flat, label="neg")
     neg_features = neg_features_flat.reshape(N_train, cfg.k_neg_train, N_FEATURES)
-    del neg_src_flat, neg_dst_flat, neg_features_flat
+    del neg_features_flat
 
     assert neg_features.shape == (N_train, cfg.k_neg_train, N_FEATURES), (
         f"neg_features shape {neg_features.shape} wrong"
