@@ -17,7 +17,7 @@ Re-exports from src.models.data_utils:
 """
 
 import logging
-from typing import Tuple
+from typing import Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -39,6 +39,7 @@ __all__ = [
     "load_temporal_data",
     "temporal_data_to_edge_data",
     "load_stream_graph_data",
+    "load_node_features_for_eagle",
     "TemporalEdgeData",
     "TemporalCSR",
     "build_temporal_csr",
@@ -48,18 +49,29 @@ __all__ = [
 ]
 
 
-def load_temporal_data(parquet_path: str) -> TemporalData:
+def load_temporal_data(
+    parquet_path: str,
+    fraction: Optional[float] = None,
+) -> TemporalData:
     """Load a stream graph parquet file as TemporalData.
 
     Expected parquet columns: src_idx, dst_idx, timestamp, btc, usd.
 
     Args:
         parquet_path: Path to the stream graph parquet file.
+        fraction: If set, take only first fraction of edges (period).
 
     Returns:
         TemporalData with fields src, dst, t (timestamps), msg ([btc, usd]).
     """
     df = pd.read_parquet(parquet_path)
+    if fraction is not None and 0.0 < fraction < 1.0:
+        period_end = int(len(df) * fraction)
+        logger.info(
+            "Applying fraction=%.2f: %d -> %d edges",
+            fraction, len(df), period_end,
+        )
+        df = df.iloc[:period_end]
     return TemporalData(
         src=torch.tensor(df["src_idx"].values, dtype=torch.long),
         dst=torch.tensor(df["dst_idx"].values, dtype=torch.long),
@@ -71,20 +83,19 @@ def load_temporal_data(parquet_path: str) -> TemporalData:
 def temporal_data_to_edge_data(
     data: TemporalData,
     undirected: bool = True,
+    external_node_feats: Optional[np.ndarray] = None,
 ) -> TemporalEdgeData:
     """Convert TemporalData to TemporalEdgeData for EAGLE training.
 
     Sorts edges by timestamp and optionally adds reverse edges for
     bidirectional temporal neighbor lookup.
 
-    EAGLE-Time does not use edge or node features — edge_feats stores
-    [btc, usd] for completeness but is ignored during training. Node
-    features are set to zeros (shape [num_nodes, 1]).
-
     Args:
         data: TemporalData loaded from a stream graph parquet file.
         undirected: If True, add reverse edges so each node accumulates
                     neighbors from both directions (matches GraphMixer protocol).
+        external_node_feats: Pre-computed node features array of shape
+                    [num_nodes, feat_dim]. If None, uses zeros (shape [N, 1]).
 
     Returns:
         TemporalEdgeData sorted by timestamp with identity node mapping.
@@ -119,7 +130,14 @@ def temporal_data_to_edge_data(
     num_nodes = int(max(src.max(), dst.max())) + 1
     node_id_map = {i: i for i in range(num_nodes)}
     reverse_node_map = np.arange(num_nodes, dtype=np.int64)
-    node_feats = np.zeros((num_nodes, 1), dtype=np.float32)
+
+    if external_node_feats is not None:
+        node_feats = external_node_feats
+        logger.info(
+            "Using external node features: shape %s", node_feats.shape,
+        )
+    else:
+        node_feats = np.zeros((num_nodes, 1), dtype=np.float32)
 
     logger.info(
         "TemporalEdgeData: %d nodes, %d edges (undirected=%s)",
@@ -139,11 +157,48 @@ def temporal_data_to_edge_data(
     )
 
 
+def load_node_features_for_eagle(
+    features_path: str,
+    num_nodes: int,
+) -> np.ndarray:
+    """Load sparse node features and expand to dense array.
+
+    Reads features_{label}.parquet with columns [node_idx, feat1, ..., feat15].
+    Returns dense float32 array of shape [num_nodes, 15] with zeros for
+    nodes not present in the features file.
+
+    Args:
+        features_path: Path to features parquet (e.g. features_10.parquet).
+        num_nodes: Total number of nodes in the graph (for dense array size).
+
+    Returns:
+        Dense float32 array [num_nodes, n_features].
+    """
+    df = pd.read_parquet(features_path)
+    node_idx = df["node_idx"].values.astype(np.int64)
+    feat_cols = [c for c in df.columns if c != "node_idx"]
+    features = df[feat_cols].values.astype(np.float32)
+    n_feats = features.shape[1]
+
+    dense = np.zeros((num_nodes, n_feats), dtype=np.float32)
+    valid = node_idx < num_nodes
+    dense[node_idx[valid]] = features[valid]
+
+    n_active = valid.sum()
+    logger.info(
+        "Loaded node features: %d/%d active nodes, %d features",
+        n_active, num_nodes, n_feats,
+    )
+    return dense
+
+
 def load_stream_graph_data(
     parquet_path: str,
     train_ratio: float = 0.7,
     val_ratio: float = 0.15,
     undirected: bool = True,
+    fraction: Optional[float] = None,
+    features_path: Optional[str] = None,
 ) -> Tuple[TemporalEdgeData, np.ndarray, np.ndarray, np.ndarray]:
     """Load a stream graph parquet file and split chronologically.
 
@@ -156,14 +211,27 @@ def load_stream_graph_data(
         val_ratio: Fraction of edges for validation (default 0.15).
                    Remaining edges form the test set.
         undirected: Add reverse edges for bidirectional lookup.
+        fraction: If set, take only first fraction of edges (period).
+        features_path: Path to features parquet. If None, node features
+                       are set to zeros.
 
     Returns:
         Tuple of (data, train_mask, val_mask, test_mask) where masks
         are boolean arrays of shape [num_edges].
     """
     logger.info("Loading stream graph: %s", parquet_path)
-    td = load_temporal_data(parquet_path)
-    data = temporal_data_to_edge_data(td, undirected=undirected)
+    td = load_temporal_data(parquet_path, fraction=fraction)
+
+    num_nodes_hint = int(max(td.src.max(), td.dst.max())) + 1
+    external_feats = None
+    if features_path is not None:
+        external_feats = load_node_features_for_eagle(
+            features_path, num_nodes_hint,
+        )
+
+    data = temporal_data_to_edge_data(
+        td, undirected=undirected, external_node_feats=external_feats,
+    )
     train_mask, val_mask, test_mask = chronological_split(
         data, train_ratio=train_ratio, val_ratio=val_ratio
     )

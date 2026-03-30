@@ -43,7 +43,8 @@ logger = logging.getLogger(__name__)
 
 
 def create_objective(data, train_mask, val_mask, device, hpo_epochs,
-                     max_val_edges, use_amp, edge_feat_dim=0, node_feat_dim=0):
+                     max_val_edges, use_amp, edge_feat_dim=0, node_feat_dim=0,
+                     active_nodes=None):
     """Create an Optuna objective function with pre-loaded data.
 
     Args:
@@ -54,6 +55,7 @@ def create_objective(data, train_mask, val_mask, device, hpo_epochs,
         hpo_epochs: Maximum epochs per trial.
         max_val_edges: Maximum validation edges (for speed).
         use_amp: Enable mixed precision.
+        active_nodes: Sorted train node indices for negative sampling.
 
     Returns:
         Objective function for optuna.study.optimize().
@@ -125,6 +127,7 @@ def create_objective(data, train_mask, val_mask, device, hpo_epochs,
                 use_amp=use_amp,
                 scaler=scaler,
                 rng=rng,
+                active_nodes=active_nodes,
             )
 
             val_metrics = validate(
@@ -137,6 +140,7 @@ def create_objective(data, train_mask, val_mask, device, hpo_epochs,
                 max_eval_edges=max_val_edges,
                 use_amp=use_amp,
                 rng=np.random.default_rng(42),
+                active_nodes=active_nodes,
             )
 
             mrr = val_metrics["mrr"]
@@ -193,7 +197,25 @@ def main():
         "--node-feat-dim",
         type=int,
         default=0,
-        help="Dimension of node features (0 = disabled).",
+        help="Dimension of node features (0 = auto-detect from features file).",
+    )
+    parser.add_argument(
+        "--fraction",
+        type=float,
+        default=None,
+        help="Fraction of stream graph to use as period (e.g. 0.10).",
+    )
+    parser.add_argument(
+        "--features-path",
+        type=str,
+        default=None,
+        help="Path to features_{label}.parquet with 15 node features.",
+    )
+    parser.add_argument(
+        "--node-mapping-path",
+        type=str,
+        default=None,
+        help="Path to node_mapping_{label}.npy.",
     )
 
     args = parser.parse_args()
@@ -218,8 +240,26 @@ def main():
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         undirected=True,
+        fraction=args.fraction,
+        features_path=args.features_path,
     )
     logger.info("Data: %s", data)
+
+    if args.node_mapping_path is not None:
+        active_nodes = np.sort(np.load(args.node_mapping_path).astype(np.int64))
+        logger.info("Loaded active_nodes: %d nodes", len(active_nodes))
+    else:
+        train_idx = np.where(train_mask)[0]
+        train_idx = train_idx[:len(train_idx) // 2]
+        src = data.src[train_idx].astype(np.int64)
+        dst = data.dst[train_idx].astype(np.int64)
+        active_nodes = np.unique(np.concatenate([src, dst]))
+        logger.info("Computed active_nodes: %d nodes", len(active_nodes))
+
+    node_feat_dim = args.node_feat_dim
+    if args.features_path and node_feat_dim == 0:
+        node_feat_dim = data.node_feats.shape[1]
+        logger.info("Auto-detected node_feat_dim=%d", node_feat_dim)
 
     objective = create_objective(
         data,
@@ -230,7 +270,8 @@ def main():
         max_val_edges=args.max_val_edges,
         use_amp=not args.no_amp,
         edge_feat_dim=args.edge_feat_dim,
-        node_feat_dim=args.node_feat_dim,
+        node_feat_dim=node_feat_dim,
+        active_nodes=active_nodes,
     )
 
     parquet_name = Path(args.parquet_path).stem
@@ -289,6 +330,12 @@ def main():
         f"YADISK_TOKEN=\"...\" PYTHONPATH=. python src/models/EAGLE/eagle_launcher.py \\\n"
         f"    --parquet-path {args.parquet_path} --epochs 100 \\\n"
     )
+    if args.fraction is not None:
+        train_cmd += f"    --fraction {args.fraction} \\\n"
+    if args.features_path is not None:
+        train_cmd += f"    --features-path {args.features_path} \\\n"
+    if args.node_mapping_path is not None:
+        train_cmd += f"    --node-mapping-path {args.node_mapping_path} \\\n"
     for key, value in best.params.items():
         flag = key.replace("_", "-")
         train_cmd += f"    --{flag} {value} \\\n"
