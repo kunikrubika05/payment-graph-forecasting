@@ -27,26 +27,20 @@ Correctness checks verified in this module:
 """
 
 import time
-from typing import Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import torch
 from scipy import sparse
-from tqdm import tqdm
 
 from sg_baselines.sampling import sample_negatives_for_eval
 from src.baselines.evaluation import compute_ranking_metrics
-from src.models.pairwise_mlp.config import PairMLPConfig, N_FEATURES
-from src.models.pairwise_mlp.features import (
-    compute_features_batch,
-    global_to_local,
-)
+from src.models.pairwise_mlp.features import compute_features_batch
 from src.models.pairwise_mlp.model import PairMLP
 
 
-def evaluate_split(
-    model: PairMLP,
+def build_eval_cache(
     eval_edges: pd.DataFrame,
     train_neighbors: dict,
     node_mapping: np.ndarray,
@@ -56,78 +50,49 @@ def evaluate_split(
     w_undir: np.ndarray,
     w_dir: np.ndarray,
     seed: int,
-    device: torch.device,
     n_negatives: int = 100,
     max_queries: int = 50_000,
     feature_batch: int = 50_000,
-    score_batch: int = 4096,
-    split_name: str = "",
     active_feature_indices: Optional[List[int]] = None,
-) -> dict:
-    """TGB-style evaluation on one split (val or test).
+    split_name: str = "",
+) -> Dict:
+    """Pre-compute candidate features for a fixed seed (call once before training).
 
-    Args:
-        model:           Trained PairMLP in eval mode.
-        eval_edges:      DataFrame with columns [src_idx, dst_idx, ...].
-        train_neighbors: Dict src→set(dst) built from train edges only.
-        node_mapping:    Sorted local→global index array from adjacency.
-        adj_undir, adj_dir: CSR adjacency matrices (local indices, train only).
-        deg_undir:       Precomputed undirected degrees (float64, local).
-        w_undir, w_dir:  Precomputed AA weights (float64, local).
-        seed:            Random seed matching sg_baselines convention:
-                           val  → random_seed + 10
-                           test → random_seed + 20
-        device:          torch.device for model inference.
-        n_negatives:            Negatives per query (default 100).
-        max_queries:            Cap on evaluated queries (default 50K).
-        feature_batch:          Pairs per scipy feature computation batch.
-        score_batch:            Queries per MLP forward batch.
-        split_name:             Tag for logging.
-        active_feature_indices: Which columns to feed the model (None = all).
-                                Must match the indices used during training.
+    Since seed is fixed per split, the same negatives are sampled on every
+    evaluate_split call. This function runs the expensive CPU steps (neg
+    sampling + scipy feature computation) once and caches the result.
+    Subsequent evaluate_split calls with the returned cache only run the
+    fast GPU forward pass and ranking.
 
     Returns:
-        Dict with n_queries, mrr, mean_rank, median_rank, hits@1/3/10.
+        dict with keys:
+          all_features:   float32 array (N_pairs, n_active_features)
+          query_offsets:  list of ints, length n_queries+1
+          n_queries:      int
     """
     tag = f"[{split_name}] " if split_name else ""
+    print(f"  {tag}Building eval cache (one-time cost)...", flush=True)
 
-    # ------------------------------------------------------------------
-    # Step 1: deduplicate edges
-    # ------------------------------------------------------------------
     src_all = eval_edges["src_idx"].values.astype(np.int64)
     dst_all = eval_edges["dst_idx"].values.astype(np.int64)
     unique_df = pd.DataFrame({"src": src_all, "dst": dst_all}).drop_duplicates()
     src_u = unique_df["src"].values.astype(np.int64)
     dst_u = unique_df["dst"].values.astype(np.int64)
 
-    # ------------------------------------------------------------------
-    # Step 2: filter — both src and dst_true must be in train node_mapping
-    # IDENTICAL to heuristics.py lines 97-107.
-    # ------------------------------------------------------------------
     train_node_set = set(node_mapping.tolist())
     keep = np.array([
         int(s) in train_node_set and int(d) in train_node_set
         for s, d in zip(src_u, dst_u)
     ], dtype=bool)
-    n_before = len(src_u)
     src_u = src_u[keep]
     dst_u = dst_u[keep]
     n_after = len(src_u)
-    print(f"  {tag}Filtered: {n_before:,} → {n_after:,} queries "
-          f"({n_before - n_after:,} with unseen nodes removed)", flush=True)
+    print(f"  {tag}{n_after:,} queries after unseen-node filter", flush=True)
 
-    # ------------------------------------------------------------------
-    # Step 3: build all_positives_per_src from ALL filtered edges
-    # BEFORE subsampling — matches heuristics.py exactly.
-    # ------------------------------------------------------------------
-    all_positives_per_src: dict[int, set] = {}
+    all_positives_per_src: dict = {}
     for s, d in zip(src_u, dst_u):
         all_positives_per_src.setdefault(int(s), set()).add(int(d))
 
-    # ------------------------------------------------------------------
-    # Step 4: subsample to max_queries if needed
-    # Same seed offset (seed + 777) as heuristics.py.
-    # ------------------------------------------------------------------
     n_total = len(src_u)
     if n_total > max_queries:
         rng_sub = np.random.RandomState(seed + 777)
@@ -135,53 +100,37 @@ def evaluate_split(
         idx.sort()
         src_u = src_u[idx]
         dst_u = dst_u[idx]
-        print(f"  {tag}Subsampled {n_total:,} → {max_queries:,} queries",
-              flush=True)
+        print(f"  {tag}Subsampled to {max_queries:,} queries", flush=True)
 
     n_queries = len(src_u)
-    print(f"  {tag}{n_queries:,} queries for ranking", flush=True)
 
-    # ------------------------------------------------------------------
-    # Step 5: sample negatives for each query (TGB-style)
-    # seed = random_seed+10 (val) or random_seed+20 (test), same as sg_baselines.
-    # Variable-length candidates per query (same as heuristics.py) to
-    # handle edge cases where fewer than n_negatives can be sampled.
-    # ------------------------------------------------------------------
     print(f"  {tag}Sampling negatives...", flush=True)
     rng = np.random.RandomState(seed)
     t0 = time.time()
 
-    all_src_list   = []
-    all_cand_list  = []
-    query_offsets  = [0]  # start index of each query's candidates
+    all_src_list: List[int] = []
+    all_cand_list: List[int] = []
+    query_offsets: List[int] = [0]
 
     for q in range(n_queries):
-        s      = int(src_u[q])
+        s = int(src_u[q])
         d_true = int(dst_u[q])
         negatives = sample_negatives_for_eval(
-            s, d_true,
-            train_neighbors,
+            s, d_true, train_neighbors,
             all_positives_per_src.get(s, set()),
-            node_mapping,           # active_nodes = train nodes only
-            n_negatives,
-            rng,
+            node_mapping, n_negatives, rng,
         )
-        # Layout: [dst_true, neg_1, ..., neg_K]
         candidates = np.concatenate([[d_true], negatives])
         n_cand = len(candidates)
         all_src_list.extend([s] * n_cand)
         all_cand_list.extend(candidates.tolist())
         query_offsets.append(query_offsets[-1] + n_cand)
 
-    all_src  = np.array(all_src_list,  dtype=np.int64)
+    all_src = np.array(all_src_list, dtype=np.int64)
     all_cand = np.array(all_cand_list, dtype=np.int64)
     print(f"  {tag}Neg sampling done, {len(all_src):,} pairs ({time.time()-t0:.1f}s)",
           flush=True)
 
-    # ------------------------------------------------------------------
-    # Step 6: compute features for all (src, cand) pairs
-    # Uses train adjacency only (no leakage).
-    # ------------------------------------------------------------------
     t0 = time.time()
     all_features = compute_features_batch(
         all_src, all_cand,
@@ -189,13 +138,48 @@ def evaluate_split(
         deg_undir, w_undir, w_dir,
         batch_size=feature_batch,
     )
-    # Apply feature column selection — must match what was used during training
     if active_feature_indices:
         all_features = all_features[:, active_feature_indices]
     print(f"  {tag}Features computed ({time.time()-t0:.1f}s)", flush=True)
 
+    return {
+        "all_features":  all_features,
+        "query_offsets": query_offsets,
+        "n_queries":     n_queries,
+    }
+
+
+def evaluate_split(
+    model: PairMLP,
+    device: torch.device,
+    eval_cache: Dict,
+    score_batch: int = 4096,
+    split_name: str = "",
+) -> dict:
+    """Score and rank using pre-built eval cache (fast, GPU-only).
+
+    Call build_eval_cache() once before training; pass the result as
+    eval_cache to every subsequent evaluate_split() call. The expensive
+    CPU work (neg sampling + feature computation) runs only once per split.
+
+    Args:
+        model:       Trained PairMLP.
+        device:      torch.device for model inference.
+        eval_cache:  Output of build_eval_cache() for this split.
+        score_batch: Pairs per MLP forward batch.
+        split_name:  Tag for logging.
+
+    Returns:
+        Dict with mrr, hits@1/3/10, n_queries, mean_rank, median_rank.
+    """
+    tag = f"[{split_name}] " if split_name else ""
+
+    all_features  = eval_cache["all_features"]
+    query_offsets = eval_cache["query_offsets"]
+    n_queries     = eval_cache["n_queries"]
+
     # ------------------------------------------------------------------
-    # Step 7: score with MLP in batches
+    # GPU scoring
     # ------------------------------------------------------------------
     t0 = time.time()
     model.eval()
@@ -211,9 +195,7 @@ def evaluate_split(
     print(f"  {tag}Scoring done ({time.time()-t0:.1f}s)", flush=True)
 
     # ------------------------------------------------------------------
-    # Step 8: compute ranks
-    # rank = count(score > true_score) + 1  (conservative: ties broken low)
-    # IDENTICAL to heuristics.py line 191.
+    # Ranking
     # ------------------------------------------------------------------
     ranks = np.empty(n_queries, dtype=np.float64)
     for q in range(n_queries):
