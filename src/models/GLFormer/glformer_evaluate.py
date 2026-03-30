@@ -13,7 +13,6 @@ Matches the baseline protocol from sg_baselines/sampling.py exactly:
 Evaluation runs on DIRECTED edges only (not undirected duplicates).
 """
 
-import contextlib
 import logging
 import time
 from collections import defaultdict
@@ -23,6 +22,19 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from payment_graph_forecasting.evaluation.ranking_loop import (
+    choose_query_indices,
+    evaluate_ranking_loop,
+)
+from payment_graph_forecasting.training.amp import autocast_context
+from payment_graph_forecasting.evaluation.temporal_ranking import (
+    conservative_rank_from_scores,
+    score_candidate_contexts,
+)
+from payment_graph_forecasting.training.temporal_context import (
+    sample_node_contexts,
+    to_device_tensor,
+)
 from src.models.GLFormer.glformer import GLFormerTime
 from src.models.GLFormer.data_utils import (
     TemporalEdgeData,
@@ -33,18 +45,9 @@ from src.models.GLFormer.glformer_train import (
     _compute_cooccurrence,
     _compute_cn_from_adj,
 )
-from src.models.data_utils import featurize_neighbors
-from src.baselines.evaluation import compute_ranking_metrics
 from sg_baselines.sampling import sample_negatives_for_eval
 
 logger = logging.getLogger(__name__)
-
-
-def _amp_autocast(enabled: bool, device_type: str):
-    """Return AMP autocast context or a no-op context manager."""
-    if enabled and device_type == "cuda":
-        return torch.amp.autocast("cuda")
-    return contextlib.nullcontext()
 
 
 def build_eval_positives_per_src(
@@ -123,11 +126,7 @@ def evaluate_tgb_style(
     n_total_edges = len(eval_src)
     eval_positives_per_src = build_eval_positives_per_src(eval_src, eval_dst)
 
-    if n_total_edges > max_edges:
-        chosen = rng.choice(n_total_edges, size=max_edges, replace=False)
-        chosen.sort()
-    else:
-        chosen = np.arange(n_total_edges)
+    chosen = choose_query_indices(n_total_edges, max_edges, rng=rng)
 
     n_queries = len(chosen)
     logger.info(
@@ -135,10 +134,7 @@ def evaluate_tgb_style(
         n_queries, n_total_edges, n_negatives, seed,
     )
 
-    all_ranks = []
-    start_time = time.time()
-
-    for i in tqdm(chosen, desc="Evaluating"):
+    def _score_rank(i: int) -> float:
         src_node = int(eval_src[i])
         true_dst = int(eval_dst[i])
         ts = float(eval_ts[i])
@@ -159,36 +155,30 @@ def evaluate_tgb_style(
 
         src_arr = np.array([src_node], dtype=np.int32)
         ts_arr = np.array([ts], dtype=np.float64)
-        src_nids, src_nts, src_neids, src_lens = sample_neighbors_batch(
-            csr, src_arr, ts_arr, K
+        src_context = sample_node_contexts(
+            csr=csr,
+            data=data,
+            sample_neighbors_fn=sample_neighbors_batch,
+            nodes=src_arr,
+            query_timestamps=ts_arr,
+            num_neighbors=K,
+            use_edge_feats=use_edge_feats,
+            use_node_feats=use_node_feats,
+            zero_pad_delta=True,
         )
-        src_dt = np.maximum(ts_arr[:, None] - src_nts, 0.0).astype(np.float32)
-        src_dt[0, src_lens[0]:] = 0.0
 
         dst_ts_arr = np.full(C, ts, dtype=np.float64)
-        dst_nids, dst_nts, dst_neids, dst_lens = sample_neighbors_batch(
-            csr, all_dst, dst_ts_arr, K
+        dst_context = sample_node_contexts(
+            csr=csr,
+            data=data,
+            sample_neighbors_fn=sample_neighbors_batch,
+            nodes=all_dst,
+            query_timestamps=dst_ts_arr,
+            num_neighbors=K,
+            use_edge_feats=use_edge_feats,
+            use_node_feats=use_node_feats,
+            zero_pad_delta=True,
         )
-        dst_dt = np.maximum(dst_ts_arr[:, None] - dst_nts, 0.0).astype(np.float32)
-        for b in range(C):
-            dst_dt[b, dst_lens[b]:] = 0.0
-
-        src_ef = dst_ef = src_nf = dst_nf = None
-        if use_edge_feats or use_node_feats:
-            _, src_ef_raw, _ = featurize_neighbors(
-                src_nids, src_neids, src_lens, src_nts, ts_arr,
-                data.node_feats, data.edge_feats,
-            )
-            _, dst_ef_raw, _ = featurize_neighbors(
-                dst_nids, dst_neids, dst_lens, dst_nts, dst_ts_arr,
-                data.node_feats, data.edge_feats,
-            )
-            if use_edge_feats:
-                src_ef = src_ef_raw.astype(np.float32)
-                dst_ef = dst_ef_raw.astype(np.float32)
-            if use_node_feats:
-                src_nf = data.node_feats[[src_node]].astype(np.float32)
-                dst_nf = data.node_feats[all_dst].astype(np.float32)
 
         cooc_counts = None
         if use_cooc:
@@ -199,46 +189,27 @@ def evaluate_tgb_style(
                     all_dst.astype(np.int64),
                 )
             else:
-                src_nids_rep = np.repeat(src_nids, C, axis=0)
-                src_lens_rep = np.repeat(src_lens, C)
+                src_nids_rep = np.repeat(src_context.neighbor_ids, C, axis=0)
+                src_lens_rep = np.repeat(src_context.lengths, C)
                 cooc_np = _compute_cooccurrence(
-                    src_nids_rep, src_lens_rep, dst_nids, dst_lens
+                    src_nids_rep, src_lens_rep, dst_context.neighbor_ids, dst_context.lengths
                 )
             cooc_counts = torch.tensor(cooc_np, dtype=torch.float32, device=device)
 
-        def _t(arr, dtype=torch.float32):
-            return torch.tensor(arr, dtype=dtype, device=device)
+        scores = score_candidate_contexts(
+            model=model,
+            device=device,
+            src_context=src_context,
+            dst_context=dst_context,
+            amp_enabled=amp_enabled,
+            cooc_counts=cooc_counts,
+        )
+        return conservative_rank_from_scores(scores)
 
-        with _amp_autocast(amp_enabled, device.type):
-            h_src = model.encode_nodes(
-                _t(src_dt), _t(src_lens, torch.int64),
-                edge_feats=_t(src_ef) if src_ef is not None else None,
-                node_feats=_t(src_nf) if src_nf is not None else None,
-            )
-            h_dst = model.encode_nodes(
-                _t(dst_dt), _t(dst_lens, torch.int64),
-                edge_feats=_t(dst_ef) if dst_ef is not None else None,
-                node_feats=_t(dst_nf) if dst_nf is not None else None,
-            )
-            h_src_exp = h_src.expand(C, -1)
-
-            cooc_feat = None
-            if model.cooc_encoder is not None and cooc_counts is not None:
-                cooc_feat = model.cooc_encoder(cooc_counts)
-
-            scores = model.edge_predictor(
-                h_src_exp, h_dst, cooc_feat
-            ).cpu().float().numpy()
-
-        true_score = scores[0]
-        rank = 1.0 + (scores[1:] > true_score).sum()
-        all_ranks.append(float(rank))
-
-    elapsed = time.time() - start_time
-    ranks_arr = np.array(all_ranks, dtype=np.float64)
-    metrics = compute_ranking_metrics(ranks_arr)
-    metrics["eval_time_sec"] = elapsed
-    metrics["edges_per_sec"] = n_queries / elapsed if elapsed > 0 else 0.0
+    metrics, elapsed = evaluate_ranking_loop(
+        chosen,
+        score_rank_fn=lambda idx: _score_rank(idx),
+    )
 
     logger.info(
         "GLFormer eval: MRR=%.4f Hits@1=%.3f Hits@3=%.3f Hits@10=%.3f "

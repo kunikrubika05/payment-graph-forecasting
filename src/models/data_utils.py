@@ -31,6 +31,105 @@ _cpp_ext = None
 _cpp_ext_loaded = False
 
 
+def _build_python_cpp_fallback():
+    """Build a Python object mirroring the C++ extension API.
+
+    This keeps legacy code paths and tests operational on machines where the
+    compiled extension is unavailable.
+    """
+
+    # TODO(REFACTORING): remove the pseudo-extension once all sampling paths use the unified backend abstraction directly.
+    class _TemporalCSRCompat:
+        def __init__(self, num_nodes, src, dst, timestamps, edge_ids):
+            sort_idx = np.lexsort((timestamps, src))
+            src_sorted = src[sort_idx]
+            self.neighbors = dst[sort_idx].astype(np.int32)
+            self.timestamps = timestamps[sort_idx].astype(np.float64)
+            self.edge_ids = edge_ids[sort_idx].astype(np.int64)
+            self.indptr = np.zeros(num_nodes + 1, dtype=np.int64)
+            for s in src_sorted:
+                self.indptr[s + 1] += 1
+            np.cumsum(self.indptr, out=self.indptr)
+
+        def get_temporal_neighbors(self, node, before_time, k):
+            start = self.indptr[node]
+            end = self.indptr[node + 1]
+            if start == end:
+                return (
+                    np.array([], dtype=np.int32),
+                    np.array([], dtype=np.float64),
+                    np.array([], dtype=np.int64),
+                )
+
+            ts_slice = self.timestamps[start:end]
+            valid_end = np.searchsorted(ts_slice, before_time, side="left")
+            if valid_end == 0:
+                return (
+                    np.array([], dtype=np.int32),
+                    np.array([], dtype=np.float64),
+                    np.array([], dtype=np.int64),
+                )
+
+            actual_start = max(start, start + valid_end - k)
+            actual_end = start + valid_end
+            return (
+                self.neighbors[actual_start:actual_end].copy(),
+                self.timestamps[actual_start:actual_end].copy(),
+                self.edge_ids[actual_start:actual_end].copy(),
+            )
+
+    class _PythonCppExtension:
+        TemporalCSR = _TemporalCSRCompat
+
+        @staticmethod
+        def sample_neighbors_batch(csr, nodes, timestamps, num_neighbors):
+            batch_size = len(nodes)
+            neighbor_nodes = np.full((batch_size, num_neighbors), -1, dtype=np.int32)
+            neighbor_ts = np.zeros((batch_size, num_neighbors), dtype=np.float64)
+            neighbor_eids = np.full((batch_size, num_neighbors), -1, dtype=np.int64)
+            lengths = np.zeros(batch_size, dtype=np.int32)
+
+            for i in range(batch_size):
+                nids, nts, neids = csr.get_temporal_neighbors(
+                    int(nodes[i]), float(timestamps[i]), int(num_neighbors)
+                )
+                length = len(nids)
+                lengths[i] = length
+                if length > 0:
+                    neighbor_nodes[i, :length] = nids
+                    neighbor_ts[i, :length] = nts
+                    neighbor_eids[i, :length] = neids
+
+            return neighbor_nodes, neighbor_ts, neighbor_eids, lengths
+
+        @staticmethod
+        def featurize_neighbors(neighbor_nodes, neighbor_eids, lengths, neighbor_ts, query_ts, node_feats, edge_feats):
+            batch_size = neighbor_nodes.shape[0]
+            k = neighbor_nodes.shape[1]
+            node_feat_dim = node_feats.shape[1]
+            edge_feat_dim = edge_feats.shape[1]
+
+            out_nnf = np.zeros((batch_size, k, node_feat_dim), dtype=np.float32)
+            out_nef = np.zeros((batch_size, k, edge_feat_dim), dtype=np.float32)
+            out_nrt = np.zeros((batch_size, k), dtype=np.float64)
+
+            for i in range(batch_size):
+                length = int(lengths[i])
+                if length == 0:
+                    continue
+                valid_nids = neighbor_nodes[i, :length]
+                out_nnf[i, :length] = node_feats[valid_nids]
+                valid_eids = neighbor_eids[i, :length]
+                for j in range(length):
+                    if valid_eids[j] >= 0:
+                        out_nef[i, j] = edge_feats[valid_eids[j]]
+                out_nrt[i, :length] = query_ts[i] - neighbor_ts[i, :length]
+
+            return out_nnf, out_nef, out_nrt
+
+    return _PythonCppExtension()
+
+
 def _load_cpp_extension():
     """Try to load the C++ temporal sampling extension."""
     global _cpp_ext, _cpp_ext_loaded
@@ -52,6 +151,7 @@ def _load_cpp_extension():
             logger.info("Loaded C++ temporal sampling extension")
     except Exception as e:
         logger.info("C++ extension unavailable (%s), using Python fallback", e)
+        _cpp_ext = _build_python_cpp_fallback()
     return _cpp_ext
 
 

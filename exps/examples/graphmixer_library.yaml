@@ -1,0 +1,40 @@
+experiment:
+  name: graphmixer_library_smoke
+  model: graphmixer
+  tags: [example, library]
+
+data:
+  source: period
+  period: mature_2020q2
+  window: 7
+  data_dir: /tmp/graphmixer_data
+  train_ratio: 0.7
+  val_ratio: 0.15
+  undirected: true
+
+sampling:
+  strategy: tgb_mixed
+  num_neighbors: 20
+  n_random_neg: 50
+  n_hist_neg: 50
+  backend: auto
+
+training:
+  epochs: 5
+  batch_size: 32
+  lr: 0.0001
+  patience: 3
+  seed: 42
+  hidden_dim: 100
+  dropout: 0.1
+
+runtime:
+  dry_run: true
+  output_dir: /tmp/graphmixer_results
+  device: auto
+  amp: true
+
+upload:
+  enabled: false
+  backend: yadisk
+  remote_dir: orbitaal_processed/experiments/example_graphmixer

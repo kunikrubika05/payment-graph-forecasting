@@ -154,6 +154,27 @@ python src/build_stream_graph.py --steps download extract process upload \
 pytest tests/ -v
 ```
 
+## Library API And YAML Experiments
+
+The repository now exposes a library-facing package:
+
+```python
+from payment_graph_forecasting import load_experiment_spec, launch_experiment
+
+spec = load_experiment_spec("exps/examples/graphmixer_library.yaml")
+result = launch_experiment(spec)
+```
+
+You can also launch experiments from YAML directly:
+
+```bash
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    exps/examples/graphmixer_library.yaml --dry-run
+```
+
+The new package path is `payment_graph_forecasting.*`. Legacy `src.*` imports
+still work through compatibility adapters while the refactor is in progress.
+
 ## Project structure
 
 ```

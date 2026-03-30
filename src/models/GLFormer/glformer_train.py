@@ -16,7 +16,6 @@ sampling, featurize_neighbors). Key differences from eagle_train.py:
        but is not the primary intended configuration.
 """
 
-import contextlib
 import json
 import logging
 import os
@@ -29,6 +28,17 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from payment_graph_forecasting.training.amp import autocast_context
+from payment_graph_forecasting.evaluation.temporal_ranking import (
+    conservative_rank_from_scores,
+    score_candidate_contexts,
+)
+from payment_graph_forecasting.training.epoch import run_loss_epoch
+from payment_graph_forecasting.training.temporal_context import (
+    sample_node_contexts,
+    to_device_tensor,
+)
+from payment_graph_forecasting.training.trainer import run_early_stopping_training
 from src.models.GLFormer.glformer import GLFormerTime
 from src.models.GLFormer.data_utils import (
     TemporalEdgeData,
@@ -36,16 +46,8 @@ from src.models.GLFormer.data_utils import (
     build_temporal_csr,
     sample_neighbors_batch,
 )
-from src.models.data_utils import featurize_neighbors
 
 logger = logging.getLogger(__name__)
-
-
-def _amp_autocast(enabled: bool, device_type: str):
-    """Return AMP autocast context or a no-op context manager."""
-    if enabled and device_type == "cuda":
-        return torch.amp.autocast("cuda")
-    return contextlib.nullcontext()
 
 
 def _compute_cooccurrence(
@@ -183,68 +185,46 @@ def prepare_glformer_batch(
 
     def _get_neighbors(nodes, ts_arr):
         """Sample neighbors and extract features for a set of nodes."""
-        n_nids, neighbor_ts, neighbor_eids, lengths = sample_neighbors_batch(
-            csr, nodes, ts_arr, num_neighbors
+        return sample_node_contexts(
+            csr=csr,
+            data=data,
+            sample_neighbors_fn=sample_neighbors_batch,
+            nodes=nodes,
+            query_timestamps=ts_arr,
+            num_neighbors=num_neighbors,
+            use_edge_feats=use_edge_feats,
+            use_node_feats=use_node_feats,
+            zero_pad_delta=True,
         )
-        delta_times = np.maximum(
-            ts_arr[:, None] - neighbor_ts, 0.0
-        ).astype(np.float32)
 
-        # Zero out delta_times for padded positions
-        for b in range(len(nodes)):
-            delta_times[b, lengths[b]:] = 0.0
-
-        edge_feats_out = None
-        node_feats_out = None
-
-        if use_edge_feats or use_node_feats:
-            _, ef_raw, _ = featurize_neighbors(
-                n_nids, neighbor_eids, lengths,
-                neighbor_ts, ts_arr,
-                data.node_feats, data.edge_feats,
-            )
-            if use_edge_feats:
-                edge_feats_out = ef_raw.astype(np.float32)
-            if use_node_feats:
-                node_feats_out = data.node_feats[nodes].astype(np.float32)
-
-        return n_nids, delta_times, edge_feats_out, node_feats_out, lengths
-
-    src_nids, src_dt, src_ef, src_nf, src_len = _get_neighbors(
-        src_nodes, timestamps
-    )
-    pos_nids, pos_dt, pos_ef, pos_nf, pos_len = _get_neighbors(
-        dst_nodes, timestamps
-    )
+    src_context = _get_neighbors(src_nodes, timestamps)
+    pos_context = _get_neighbors(dst_nodes, timestamps)
 
     neg_flat = neg_dst_nodes.reshape(-1)
     neg_ts = np.repeat(timestamps, num_neg)
-    neg_nids, neg_dt, neg_ef, neg_nf, neg_len = _get_neighbors(neg_flat, neg_ts)
-
-    def _t(arr, dtype=torch.float32):
-        return torch.tensor(arr, dtype=dtype, device=device)
+    neg_context = _get_neighbors(neg_flat, neg_ts)
 
     batch = {
-        "src_delta_times":      _t(src_dt),
-        "src_lengths":          _t(src_len, torch.int64),
-        "pos_dst_delta_times":  _t(pos_dt),
-        "pos_dst_lengths":      _t(pos_len, torch.int64),
-        "neg_dst_delta_times":  _t(neg_dt.reshape(batch_size, num_neg, num_neighbors)),
-        "neg_dst_lengths":      _t(neg_len.reshape(batch_size, num_neg), torch.int64),
+        "src_delta_times":      to_device_tensor(src_context.delta_times, device),
+        "src_lengths":          to_device_tensor(src_context.lengths, device, torch.int64),
+        "pos_dst_delta_times":  to_device_tensor(pos_context.delta_times, device),
+        "pos_dst_lengths":      to_device_tensor(pos_context.lengths, device, torch.int64),
+        "neg_dst_delta_times":  to_device_tensor(neg_context.delta_times.reshape(batch_size, num_neg, num_neighbors), device),
+        "neg_dst_lengths":      to_device_tensor(neg_context.lengths.reshape(batch_size, num_neg), device, torch.int64),
     }
 
     if use_edge_feats:
-        ef_dim = src_ef.shape[-1]
-        batch["src_edge_feats"]     = _t(src_ef)
-        batch["pos_dst_edge_feats"] = _t(pos_ef)
-        batch["neg_dst_edge_feats"] = _t(
-            neg_ef.reshape(batch_size, num_neg, num_neighbors, ef_dim)
+        ef_dim = src_context.edge_features.shape[-1]
+        batch["src_edge_feats"]     = to_device_tensor(src_context.edge_features, device)
+        batch["pos_dst_edge_feats"] = to_device_tensor(pos_context.edge_features, device)
+        batch["neg_dst_edge_feats"] = to_device_tensor(
+            neg_context.edge_features.reshape(batch_size, num_neg, num_neighbors, ef_dim), device
         )
 
     if use_node_feats:
-        batch["src_node_feats"]     = _t(src_nf)
-        batch["pos_dst_node_feats"] = _t(pos_nf)
-        batch["neg_dst_node_feats"] = _t(neg_nf.reshape(batch_size, num_neg, -1))
+        batch["src_node_feats"]     = to_device_tensor(src_context.node_features, device)
+        batch["pos_dst_node_feats"] = to_device_tensor(pos_context.node_features, device)
+        batch["neg_dst_node_feats"] = to_device_tensor(neg_context.node_features.reshape(batch_size, num_neg, -1), device)
 
     if use_cooccurrence:
         if adj is not None and node_mapping is not None:
@@ -259,14 +239,17 @@ def prepare_glformer_batch(
                 neg_flat.astype(np.int64),
             )
         else:
-            pos_cooc = _compute_cooccurrence(src_nids, src_len, pos_nids, pos_len)
-            src_nids_rep = np.repeat(src_nids, num_neg, axis=0)
-            src_len_rep = np.repeat(src_len, num_neg)
-            neg_cooc_flat = _compute_cooccurrence(
-                src_nids_rep, src_len_rep, neg_nids, neg_len
+            pos_cooc = _compute_cooccurrence(
+                src_context.neighbor_ids, src_context.lengths,
+                pos_context.neighbor_ids, pos_context.lengths,
             )
-        batch["pos_cooc_counts"] = _t(pos_cooc)
-        batch["neg_cooc_counts"] = _t(neg_cooc_flat.reshape(batch_size, num_neg))
+            src_nids_rep = np.repeat(src_context.neighbor_ids, num_neg, axis=0)
+            src_len_rep = np.repeat(src_context.lengths, num_neg)
+            neg_cooc_flat = _compute_cooccurrence(
+                src_nids_rep, src_len_rep, neg_context.neighbor_ids, neg_context.lengths
+            )
+        batch["pos_cooc_counts"] = to_device_tensor(pos_cooc, device)
+        batch["neg_cooc_counts"] = to_device_tensor(neg_cooc_flat.reshape(batch_size, num_neg), device)
 
     return batch
 
@@ -325,29 +308,15 @@ def train_epoch(
     use_node_feats = model.node_feat_dim > 0
     use_cooc = model.use_cooccurrence
 
-    shuffled = rng.permutation(edge_indices)
-    total_loss = 0.0
-    num_batches = 0
-    n_total = (len(shuffled) + batch_size - 1) // batch_size
+    def _loss_for_batch(batch_idx: np.ndarray) -> torch.Tensor:
+        B = len(batch_idx)
 
-    pbar = tqdm(
-        range(0, len(shuffled), batch_size),
-        total=n_total,
-        desc="Training",
-        leave=False,
-        unit="batch",
-    )
-    for start in pbar:
-        end = min(start + batch_size, len(shuffled))
-        idx = shuffled[start:end]
-        B = len(idx)
-
-        src = data.src[idx]
-        dst = data.dst[idx]
-        ts = data.timestamps[idx]
+        src = data.src[batch_idx]
+        dst = data.dst[batch_idx]
+        ts = data.timestamps[batch_idx]
         if neg_node_pool is not None:
-            idx = rng.integers(0, len(neg_node_pool), size=(B, neg_per_positive))
-            neg_dst = neg_node_pool[idx]
+            neg_idx = rng.integers(0, len(neg_node_pool), size=(B, neg_per_positive))
+            neg_dst = neg_node_pool[neg_idx]
         else:
             neg_dst = rng.integers(0, data.num_nodes, size=(B, neg_per_positive))
 
@@ -360,7 +329,7 @@ def train_epoch(
             node_mapping=node_mapping,
         )
 
-        with _amp_autocast(amp_enabled, device.type):
+        with autocast_context(amp_enabled, device.type):
             pos_logits = model(
                 src_delta_times=batch["src_delta_times"],
                 src_lengths=batch["src_lengths"],
@@ -404,26 +373,20 @@ def train_epoch(
                 torch.ones(B, device=device),
                 torch.zeros(B * neg_per_positive, device=device),
             ])
-            loss = criterion(all_logits, all_labels)
+            return criterion(all_logits, all_labels)
 
-        optimizer.zero_grad()
-        if amp_enabled and scaler is not None:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-        total_loss += loss.item()
-        num_batches += 1
-        pbar.set_postfix(loss=f"{total_loss / num_batches:.8f}")
-
-    pbar.close()
-    return {"loss": total_loss / max(num_batches, 1)}
+    return run_loss_epoch(
+        edge_indices=edge_indices,
+        batch_size=batch_size,
+        rng=rng,
+        loss_fn=_loss_for_batch,
+        optimizer=optimizer,
+        model=model,
+        amp_enabled=amp_enabled,
+        scaler=scaler,
+        progress_desc="Training",
+        loss_format="{:.8f}",
+    )
 
 
 @torch.no_grad()
@@ -500,36 +463,30 @@ def validate(
 
         src_arr = np.array([src_node], dtype=np.int32)
         ts_arr = np.array([ts], dtype=np.float64)
-        src_nids, src_nts, src_neids, src_lens = sample_neighbors_batch(
-            csr, src_arr, ts_arr, K
+        src_context = sample_node_contexts(
+            csr=csr,
+            data=data,
+            sample_neighbors_fn=sample_neighbors_batch,
+            nodes=src_arr,
+            query_timestamps=ts_arr,
+            num_neighbors=K,
+            use_edge_feats=use_edge_feats,
+            use_node_feats=use_node_feats,
+            zero_pad_delta=True,
         )
-        src_dt = np.maximum(ts_arr[:, None] - src_nts, 0.0).astype(np.float32)
-        src_dt[0, src_lens[0]:] = 0.0
 
         dst_ts_arr = np.full(C, ts, dtype=np.float64)
-        dst_nids, dst_nts, dst_neids, dst_lens = sample_neighbors_batch(
-            csr, all_dst, dst_ts_arr, K
+        dst_context = sample_node_contexts(
+            csr=csr,
+            data=data,
+            sample_neighbors_fn=sample_neighbors_batch,
+            nodes=all_dst,
+            query_timestamps=dst_ts_arr,
+            num_neighbors=K,
+            use_edge_feats=use_edge_feats,
+            use_node_feats=use_node_feats,
+            zero_pad_delta=True,
         )
-        dst_dt = np.maximum(dst_ts_arr[:, None] - dst_nts, 0.0).astype(np.float32)
-        for b in range(C):
-            dst_dt[b, dst_lens[b]:] = 0.0
-
-        src_ef = dst_ef = src_nf = dst_nf = None
-        if use_edge_feats or use_node_feats:
-            _, src_ef_raw, _ = featurize_neighbors(
-                src_nids, src_neids, src_lens, src_nts, ts_arr,
-                data.node_feats, data.edge_feats,
-            )
-            _, dst_ef_raw, _ = featurize_neighbors(
-                dst_nids, dst_neids, dst_lens, dst_nts, dst_ts_arr,
-                data.node_feats, data.edge_feats,
-            )
-            if use_edge_feats:
-                src_ef = src_ef_raw.astype(np.float32)
-                dst_ef = dst_ef_raw.astype(np.float32)
-            if use_node_feats:
-                src_nf = data.node_feats[[src_node]].astype(np.float32)
-                dst_nf = data.node_feats[all_dst].astype(np.float32)
 
         cooc_counts = None
         if use_cooc:
@@ -540,39 +497,22 @@ def validate(
                     all_dst.astype(np.int64),
                 )
             else:
-                src_nids_rep = np.repeat(src_nids, C, axis=0)
-                src_lens_rep = np.repeat(src_lens, C)
+                src_nids_rep = np.repeat(src_context.neighbor_ids, C, axis=0)
+                src_lens_rep = np.repeat(src_context.lengths, C)
                 cooc_np = _compute_cooccurrence(
-                    src_nids_rep, src_lens_rep, dst_nids, dst_lens
+                    src_nids_rep, src_lens_rep, dst_context.neighbor_ids, dst_context.lengths
                 )
             cooc_counts = torch.tensor(cooc_np, dtype=torch.float32, device=device)
 
-        def _t(arr, dtype=torch.float32):
-            return torch.tensor(arr, dtype=dtype, device=device)
-
-        with _amp_autocast(amp_enabled, device.type):
-            h_src = model.encode_nodes(
-                _t(src_dt), _t(src_lens, torch.int64),
-                edge_feats=_t(src_ef) if src_ef is not None else None,
-                node_feats=_t(src_nf) if src_nf is not None else None,
-            )
-            h_dst = model.encode_nodes(
-                _t(dst_dt), _t(dst_lens, torch.int64),
-                edge_feats=_t(dst_ef) if dst_ef is not None else None,
-                node_feats=_t(dst_nf) if dst_nf is not None else None,
-            )
-            h_src_exp = h_src.expand(C, -1)
-
-            cooc_feat = None
-            if model.cooc_encoder is not None and cooc_counts is not None:
-                cooc_feat = model.cooc_encoder(cooc_counts)
-
-            scores = model.edge_predictor(
-                h_src_exp, h_dst, cooc_feat
-            ).cpu().float().numpy()
-
-        true_score = scores[0]
-        rank = 1.0 + (scores[1:] > true_score).sum()
+        scores = score_candidate_contexts(
+            model=model,
+            device=device,
+            src_context=src_context,
+            dst_context=dst_context,
+            amp_enabled=amp_enabled,
+            cooc_counts=cooc_counts,
+        )
+        rank = conservative_rank_from_scores(scores)
         ranks.append(rank)
 
     ranks = np.array(ranks, dtype=np.float64)
@@ -704,18 +644,6 @@ def train_glformer(
         len(train_active_nodes), data.num_nodes,
     )
 
-    history = {
-        "train_loss": [],
-        "val_mrr": [],
-        "val_hits@1": [],
-        "val_hits@3": [],
-        "val_hits@10": [],
-        "epoch_time": [],
-    }
-    best_val_mrr = -1.0
-    best_epoch = -1
-    epochs_no_improve = 0
-
     config = {
         "model": "GLFormerTime",
         "hidden_dim": hidden_dim,
@@ -747,12 +675,19 @@ def train_glformer(
         "Training GLFormer: %d epochs, %d train, %d val edges",
         num_epochs, len(train_indices), len(val_indices),
     )
-
-    for epoch in range(1, num_epochs + 1):
-        epoch_start = time.time()
-
-        train_metrics = train_epoch(
-            model, data, train_csr, train_indices, optimizer, device,
+    history, _summary = run_early_stopping_training(
+        model=model,
+        output_dir=output_dir,
+        device=device,
+        num_epochs=num_epochs,
+        patience=patience,
+        train_epoch_fn=lambda: train_epoch(
+            model,
+            data,
+            train_csr,
+            train_indices,
+            optimizer,
+            device,
             batch_size=batch_size,
             num_neighbors=num_neighbors,
             use_amp=use_amp,
@@ -761,10 +696,13 @@ def train_glformer(
             neg_node_pool=train_active_nodes,
             adj=adj,
             node_mapping=node_mapping,
-        )
-
-        val_metrics = validate(
-            model, data, full_csr, val_indices, device,
+        ),
+        validate_fn=lambda: validate(
+            model,
+            data,
+            full_csr,
+            val_indices,
+            device,
             num_neighbors=num_neighbors,
             max_eval_edges=max_val_edges,
             use_amp=use_amp,
@@ -772,70 +710,8 @@ def train_glformer(
             neg_node_pool=train_active_nodes,
             adj=adj,
             node_mapping=node_mapping,
-        )
-
-        epoch_time = time.time() - epoch_start
-
-        history["train_loss"].append(train_metrics["loss"])
-        history["val_mrr"].append(val_metrics["mrr"])
-        history["val_hits@1"].append(val_metrics["hits@1"])
-        history["val_hits@3"].append(val_metrics["hits@3"])
-        history["val_hits@10"].append(val_metrics["hits@10"])
-        history["epoch_time"].append(epoch_time)
-
-        logger.info(
-            "Epoch %d/%d [%.1fs] loss=%.8f mrr=%.4f h@1=%.3f h@3=%.3f h@10=%.3f",
-            epoch, num_epochs, epoch_time,
-            train_metrics["loss"],
-            val_metrics["mrr"], val_metrics["hits@1"],
-            val_metrics["hits@3"], val_metrics["hits@10"],
-        )
-
-        if val_metrics["mrr"] > best_val_mrr:
-            best_val_mrr = val_metrics["mrr"]
-            best_epoch = epoch
-            epochs_no_improve = 0
-            torch.save(
-                model.state_dict(),
-                os.path.join(output_dir, "best_model.pt"),
-            )
-            logger.info("New best model (MRR=%.4f)", best_val_mrr)
-        else:
-            epochs_no_improve += 1
-
-        with open(os.path.join(output_dir, "metrics.jsonl"), "a") as f:
-            record = {
-                "epoch": epoch,
-                **train_metrics,
-                **{f"val_{k}": v for k, v in val_metrics.items()},
-                "epoch_time": epoch_time,
-            }
-            f.write(json.dumps(record) + "\n")
-
-        if epochs_no_improve >= patience:
-            logger.info(
-                "Early stopping at epoch %d (patience=%d)", epoch, patience
-            )
-            break
-
-    model.load_state_dict(
-        torch.load(
-            os.path.join(output_dir, "best_model.pt"),
-            map_location=device,
-            weights_only=True,
-        )
-    )
-
-    summary = {
-        "best_epoch": best_epoch,
-        "best_val_mrr": best_val_mrr,
-        "total_epochs": epoch,
-        "final_train_loss": history["train_loss"][-1],
-    }
-    with open(os.path.join(output_dir, "summary.json"), "w") as f:
-        json.dump(summary, f, indent=2)
-
-    logger.info(
-        "Training complete. Best epoch=%d, MRR=%.4f", best_epoch, best_val_mrr
+        ),
+        logger=logger,
+        train_loss_format="%.8f",
     )
     return model, history

@@ -104,7 +104,13 @@ class TPPR:
         for key, weight in smaller.items():
             if key in larger:
                 sim += weight * larger[key]
-        return sim
+
+        # Account for direct mutual affinity as well. Immediately after seeing a
+        # single edge (u, v), the two sparse PPR dictionaries often point to
+        # each other but do not yet share overlapping support, so a pure
+        # dot-product stays at zero.
+        direct_affinity = 0.5 * (src_ppr.get(dst, 0.0) + dst_ppr.get(src, 0.0))
+        return sim + direct_affinity
 
     def _update_single(self, s1: int, s2: int) -> Dict[int, float]:
         """Compute updated PPR for s1 after observing edge to s2.
