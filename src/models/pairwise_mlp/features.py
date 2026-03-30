@@ -283,7 +283,7 @@ def compute_features_parallel(
     chunks_src = np.array_split(src_global, n_jobs)
     chunks_dst = np.array_split(dst_global, n_jobs)
 
-    results = Parallel(n_jobs=n_jobs, backend="loky", verbose=0)(
+    results = Parallel(n_jobs=n_jobs, backend="threading", verbose=0)(
         delayed(_worker_fn)(
             cs, cd, node_mapping, adj_undir, adj_dir,
             deg_undir, w_undir, w_dir, batch_size,

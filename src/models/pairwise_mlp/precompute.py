@@ -53,6 +53,7 @@ from src.models.pairwise_mlp.config import (
     PairMLPConfig,
     PERIODS,
     YADISK_EXPERIMENTS_BASE,
+    N_FEATURES,
 )
 from src.models.pairwise_mlp.features import (
     precompute_degrees,
@@ -251,29 +252,42 @@ def run_precompute(cfg: PairMLPConfig, token: str) -> None:
     # ------------------------------------------------------------------
     print(f"\n[4/6] Sampling {cfg.k_neg_train} negatives per positive train edge...",
           flush=True)
-    rng = np.random.RandomState(cfg.random_seed)
-    t0 = time.time()
-    neg_dst = sample_train_negatives_fixed_k(
-        train_src, train_dst,
-        train_neighbors, active_nodes,
-        k=cfg.k_neg_train,
-        k_hist_max=cfg.k_hist_max,
-        rng=rng,
-    )
-    assert neg_dst.shape == (N_train, cfg.k_neg_train), (
-        f"neg_dst shape {neg_dst.shape} != ({N_train}, {cfg.k_neg_train})"
-    )
+    neg_dst_checkpoint = os.path.join(out_dir, "neg_dst.npy")
 
-    # CORRECTNESS CHECK: all negative destinations must be train nodes.
-    neg_flat = neg_dst.ravel()
-    active_set = set(active_nodes.tolist())
-    n_bad = int(np.sum(~np.isin(neg_flat, active_nodes)))
-    assert n_bad == 0, (
-        f"{n_bad:,} negative destinations not in active_nodes (train nodes)!"
-    )
-    print(f"  Sampled {N_train * cfg.k_neg_train:,} negatives ({time.time()-t0:.1f}s)",
-          flush=True)
-    print(f"  All negatives in train nodes: OK", flush=True)
+    if os.path.exists(neg_dst_checkpoint):
+        neg_dst = np.load(neg_dst_checkpoint)
+        print(f"  [resume] Loaded neg_dst from checkpoint: {neg_dst.shape}", flush=True)
+        assert neg_dst.shape == (N_train, cfg.k_neg_train), (
+            f"Checkpoint neg_dst shape {neg_dst.shape} != ({N_train}, {cfg.k_neg_train}). "
+            "Delete checkpoint and re-run."
+        )
+    else:
+        rng = np.random.RandomState(cfg.random_seed)
+        t0 = time.time()
+        neg_dst = sample_train_negatives_fixed_k(
+            train_src, train_dst,
+            train_neighbors, active_nodes,
+            k=cfg.k_neg_train,
+            k_hist_max=cfg.k_hist_max,
+            rng=rng,
+        )
+        assert neg_dst.shape == (N_train, cfg.k_neg_train), (
+            f"neg_dst shape {neg_dst.shape} != ({N_train}, {cfg.k_neg_train})"
+        )
+
+        # CORRECTNESS CHECK: all negative destinations must be train nodes.
+        neg_flat = neg_dst.ravel()
+        n_bad = int(np.sum(~np.isin(neg_flat, active_nodes)))
+        assert n_bad == 0, (
+            f"{n_bad:,} negative destinations not in active_nodes (train nodes)!"
+        )
+        print(f"  Sampled {N_train * cfg.k_neg_train:,} negatives ({time.time()-t0:.1f}s)",
+              flush=True)
+        print(f"  All negatives in train nodes: OK", flush=True)
+
+        # Checkpoint: save immediately so a crash in step 5 doesn't lose 48+ min of work.
+        np.save(neg_dst_checkpoint, neg_dst)
+        print(f"  Checkpoint saved: {neg_dst_checkpoint}", flush=True)
 
     # ------------------------------------------------------------------
     # [5] Precompute degrees and AA weights (once, reused for all batches)
