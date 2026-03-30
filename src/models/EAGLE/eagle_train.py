@@ -161,6 +161,7 @@ def train_epoch(
     use_amp: bool = True,
     scaler: Optional[torch.cuda.amp.GradScaler] = None,
     rng: np.random.Generator = None,
+    active_nodes: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """Run one training epoch.
 
@@ -177,6 +178,8 @@ def train_epoch(
         use_amp: Enable mixed precision.
         scaler: GradScaler for AMP.
         rng: Random number generator.
+        active_nodes: Train node indices for negative sampling. If None,
+                      falls back to uniform sampling from all nodes.
 
     Returns:
         Dict with 'loss' (average batch loss).
@@ -211,9 +214,15 @@ def train_epoch(
         src = data.src[batch_idx]
         dst = data.dst[batch_idx]
         ts = data.timestamps[batch_idx]
-        neg_dst = rng.integers(
-            0, data.num_nodes, size=(actual_batch, neg_per_positive)
-        )
+        if active_nodes is not None:
+            neg_idx = rng.integers(
+                0, len(active_nodes), size=(actual_batch, neg_per_positive)
+            )
+            neg_dst = active_nodes[neg_idx].astype(np.int32)
+        else:
+            neg_dst = rng.integers(
+                0, data.num_nodes, size=(actual_batch, neg_per_positive)
+            )
 
         batch = prepare_eagle_batch(
             csr, data, src, dst, ts, neg_dst, num_neighbors, device,
@@ -294,6 +303,7 @@ def validate(
     max_eval_edges: int = 5000,
     use_amp: bool = True,
     rng: np.random.Generator = None,
+    active_nodes: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """Run validation with ranking metrics.
 
@@ -308,6 +318,7 @@ def validate(
         max_eval_edges: Max edges to evaluate (subsample for speed).
         use_amp: Enable mixed precision.
         rng: Random number generator.
+        active_nodes: Train node indices for negative sampling.
 
     Returns:
         Dict with 'mrr', 'hits@1', 'hits@3', 'hits@10'.
@@ -333,9 +344,13 @@ def validate(
         true_dst = data.dst[idx]
         ts = data.timestamps[idx]
 
-        neg_nodes = rng.integers(
-            0, data.num_nodes, size=n_eval_negatives
-        ).astype(np.int32)
+        if active_nodes is not None:
+            neg_idx = rng.integers(0, len(active_nodes), size=n_eval_negatives)
+            neg_nodes = active_nodes[neg_idx].astype(np.int32)
+        else:
+            neg_nodes = rng.integers(
+                0, data.num_nodes, size=n_eval_negatives
+            ).astype(np.int32)
         all_dst = np.concatenate([[true_dst], neg_nodes])
         num_candidates = len(all_dst)
 
@@ -393,11 +408,7 @@ def validate(
             ).cpu().float().numpy()
 
         true_score = scores[0]
-        rank = (
-            1
-            + (scores[1:] > true_score).sum()
-            + 0.5 * (scores[1:] == true_score).sum()
-        )
+        rank = float(np.sum(scores[1:] > true_score) + 1)
         ranks.append(rank)
 
     ranks = np.array(ranks, dtype=np.float64)
@@ -433,6 +444,7 @@ def train_eagle(
     use_amp: bool = True,
     edge_feat_dim: int = 0,
     node_feat_dim: int = 0,
+    active_nodes: Optional[np.ndarray] = None,
 ) -> Tuple[EAGLETime, Dict]:
     """Full training pipeline for EAGLE-Time.
 
@@ -456,6 +468,8 @@ def train_eagle(
         seed: Random seed.
         max_val_edges: Max validation edges per epoch.
         use_amp: Enable mixed precision training.
+        active_nodes: Sorted array of train node indices for negative
+                      sampling. If None, samples from all nodes.
 
     Returns:
         Tuple of (trained model, training history dict).
@@ -564,6 +578,7 @@ def train_eagle(
             use_amp=use_amp,
             scaler=scaler,
             rng=rng,
+            active_nodes=active_nodes,
         )
 
         val_metrics = validate(
@@ -576,6 +591,7 @@ def train_eagle(
             max_eval_edges=max_val_edges,
             use_amp=use_amp,
             rng=rng,
+            active_nodes=active_nodes,
         )
 
         epoch_time = time.time() - epoch_start
