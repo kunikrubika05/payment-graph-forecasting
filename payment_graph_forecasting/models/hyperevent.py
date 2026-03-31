@@ -20,6 +20,7 @@ class HyperEventAdapter(BaseRunnerAdapter):
             "data_source": spec.data.source,
             "raw_path": spec.data.raw_path,
             "raw_remote_path": spec.data.raw_remote_path,
+            "data_extra": spec.data.extra,
             "parquet_path": spec.data.parquet_path,
             "parquet_remote_path": spec.data.parquet_remote_path,
             "data_backend": spec.data.download_backend,

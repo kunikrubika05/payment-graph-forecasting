@@ -152,6 +152,7 @@ def run_glformer_experiment(args: argparse.Namespace):
             data_source=args.data_source,
             raw_path=args.raw_path,
             raw_remote_path=args.raw_remote_path,
+            data_extra=getattr(args, "data_extra", {}),
             parquet_path=args.parquet_path,
             parquet_remote_path=args.parquet_remote_path,
             device=getattr(args, "device", "auto"),
@@ -192,7 +193,7 @@ def run_glformer_experiment(args: argparse.Namespace):
                 "download_backend": getattr(args, "data_backend", "yadisk"),
                 "cache_dir": getattr(args, "data_cache_dir", None),
                 "token_env": getattr(args, "data_token_env", "YADISK_TOKEN"),
-                "extra": {},
+                "extra": getattr(args, "data_extra", {}),
             },
         )()
     )

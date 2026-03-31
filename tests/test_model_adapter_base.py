@@ -24,6 +24,7 @@ class DummyRunnerAdapter(BaseRunnerAdapter):
     def build_runner_kwargs(self, spec: ExperimentSpec) -> dict[str, object]:
         return {
             "foo": spec.experiment.name,
+            "data_extra": spec.data.extra,
             **self.common_training_kwargs(spec),
             **self.common_runtime_kwargs(spec),
         }
@@ -92,6 +93,16 @@ def test_base_runner_adapter_builds_execution_plan():
     assert plan.as_namespace().epochs == 3
 
 
+def test_base_runner_adapter_preserves_data_extra_in_execution_plan():
+    spec = _make_spec("dummy")
+    spec.data.extra["src_col"] = "source"
+    adapter = DummyRunnerAdapter()
+
+    plan = adapter.build_execution_plan(spec)
+
+    assert plan.runner_kwargs["data_extra"] == {"src_col": "source"}
+
+
 def test_graphmixer_adapter_uses_shared_defaults():
     payload = GraphMixerAdapter().build_runner_kwargs(_make_spec("graphmixer"))
 
@@ -117,6 +128,7 @@ def test_eagle_adapter_uses_shared_defaults():
     assert payload["parquet_remote_path"] == "remote/data.parquet"
     assert payload["data_cache_dir"] == "/tmp/data_cache"
     assert payload["data_token_env"] == "DATA_TOKEN"
+    assert payload["data_extra"] == {}
 
 
 def test_glformer_adapter_uses_shared_defaults_and_experiment_name():
