@@ -86,6 +86,18 @@ def _sample_contexts(
     )
 
 
+def _slice_context(context: NodeTemporalContext, start: int, end: int) -> NodeTemporalContext:
+    """Take a row slice from a sampled temporal context without copying metadata."""
+
+    return NodeTemporalContext(
+        neighbor_ids=context.neighbor_ids[start:end],
+        delta_times=context.delta_times[start:end],
+        lengths=context.lengths[start:end],
+        edge_features=context.edge_features[start:end] if context.edge_features is not None else None,
+        node_features=context.node_features[start:end] if context.node_features is not None else None,
+    )
+
+
 def prepare_dygformer_batch(
     *,
     csr: TemporalCSR,
@@ -104,36 +116,22 @@ def prepare_dygformer_batch(
     batch_size = len(src_nodes)
     num_neg = neg_dst_nodes.shape[1] if neg_dst_nodes.ndim > 1 else 1
 
-    src_context = _sample_contexts(
-        csr=csr,
-        data=data,
-        nodes=src_nodes,
-        timestamps=timestamps,
-        num_neighbors=num_neighbors,
-        use_edge_feats=use_edge_feats,
-        use_node_feats=use_node_feats,
-    )
-    pos_context = _sample_contexts(
-        csr=csr,
-        data=data,
-        nodes=dst_nodes,
-        timestamps=timestamps,
-        num_neighbors=num_neighbors,
-        use_edge_feats=use_edge_feats,
-        use_node_feats=use_node_feats,
-    )
-
     neg_flat = neg_dst_nodes.reshape(-1).astype(np.int32)
     neg_timestamps = np.repeat(timestamps, num_neg)
-    neg_context = _sample_contexts(
+    all_nodes = np.concatenate([src_nodes, dst_nodes, neg_flat]).astype(np.int32, copy=False)
+    all_timestamps = np.concatenate([timestamps, timestamps, neg_timestamps]).astype(np.float64, copy=False)
+    all_context = _sample_contexts(
         csr=csr,
         data=data,
-        nodes=neg_flat,
-        timestamps=neg_timestamps,
+        nodes=all_nodes,
+        timestamps=all_timestamps,
         num_neighbors=num_neighbors,
         use_edge_feats=use_edge_feats,
         use_node_feats=use_node_feats,
     )
+    src_context = _slice_context(all_context, 0, batch_size)
+    pos_context = _slice_context(all_context, batch_size, 2 * batch_size)
+    neg_context = _slice_context(all_context, 2 * batch_size, 2 * batch_size + batch_size * num_neg)
 
     pos_src_cooc, pos_dst_cooc = compute_neighbor_cooccurrence(
         src_context.neighbor_ids,
