@@ -113,6 +113,22 @@ def evaluate_tgb_style(
     use_edge_feats = model.edge_feat_dim > 0
     use_node_feats = model.node_feat_dim > 0
 
+    # Filter: only evaluate edges where BOTH src and dst_true are in train
+    # nodes (active_nodes). Edges with unseen nodes get score=0 for all 101
+    # candidates → rank=1 → inflated MRR. Required by CORRECTNESS_CHECKLIST.
+    train_node_set = set(active_nodes.tolist())
+    keep = np.array([
+        int(s) in train_node_set and int(d) in train_node_set
+        for s, d in zip(eval_src, eval_dst)
+    ], dtype=bool)
+    eval_src = eval_src[keep]
+    eval_dst = eval_dst[keep]
+    eval_ts = eval_ts[keep]
+    n_filtered = (~keep).sum()
+    if n_filtered > 0:
+        logger.info("Eval: filtered %d/%d queries with unknown nodes",
+                    n_filtered, len(keep))
+
     n_total_edges = len(eval_src)
     eval_positives_per_src = build_eval_positives_per_src(eval_src, eval_dst)
 

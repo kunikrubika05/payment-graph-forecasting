@@ -365,13 +365,23 @@ class DyGFormerEncoder(nn.Module):
             self._patch_and_align(dst_C, self.align_C),
         ]
 
-        if self.align_E is not None and src_edge_feats is not None:
-            src_parts.append(self._patch_and_align(src_edge_feats, self.align_E))
-            dst_parts.append(self._patch_and_align(dst_edge_feats, self.align_E))
+        if self.align_E is not None:
+            if src_edge_feats is not None:
+                src_parts.append(self._patch_and_align(src_edge_feats, self.align_E))
+                dst_parts.append(self._patch_and_align(dst_edge_feats, self.align_E))
+            else:
+                zeros = torch.zeros(B, n_patches, self.aligned_dim, device=device)
+                src_parts.append(zeros)
+                dst_parts.append(zeros)
 
-        if self.align_N is not None and src_node_feats is not None:
-            src_parts.append(self._patch_and_align(src_node_feats, self.align_N))
-            dst_parts.append(self._patch_and_align(dst_node_feats, self.align_N))
+        if self.align_N is not None:
+            if src_node_feats is not None:
+                src_parts.append(self._patch_and_align(src_node_feats, self.align_N))
+                dst_parts.append(self._patch_and_align(dst_node_feats, self.align_N))
+            else:
+                zeros = torch.zeros(B, n_patches, self.aligned_dim, device=device)
+                src_parts.append(zeros)
+                dst_parts.append(zeros)
 
         Z_src = torch.cat(src_parts, dim=-1)
         Z_dst = torch.cat(dst_parts, dim=-1)

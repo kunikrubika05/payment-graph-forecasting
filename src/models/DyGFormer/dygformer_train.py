@@ -246,7 +246,7 @@ def train_epoch(
     device: torch.device,
     batch_size: int = 200,
     num_neighbors: int = 32,
-    neg_per_positive: int = 1,
+    neg_per_positive: int = 5,
     use_amp: bool = True,
     scaler: Optional[torch.cuda.amp.GradScaler] = None,
     rng: Optional[np.random.Generator] = None,
@@ -560,6 +560,7 @@ def train_dygformer(
     use_amp: bool = True,
     edge_feat_dim: int = 2,
     node_feat_dim: int = 0,
+    neg_per_positive: int = 5,
 ) -> Tuple[DyGFormerTime, Dict]:
     """Full DyGFormer training pipeline with early stopping.
 
@@ -596,6 +597,7 @@ def train_dygformer(
         use_amp: Enable AMP mixed precision (CUDA only).
         edge_feat_dim: Per-neighbor edge feature dimension.
         node_feat_dim: Per-neighbor node feature dimension.
+        neg_per_positive: Random negatives per positive edge during training.
 
     Returns:
         Tuple of (best model, training history dict).
@@ -678,6 +680,7 @@ def train_dygformer(
         "dropout": dropout,
         "edge_feat_dim": edge_feat_dim,
         "node_feat_dim": node_feat_dim,
+        "neg_per_positive": neg_per_positive,
         "batch_size": batch_size,
         "learning_rate": learning_rate,
         "weight_decay": weight_decay,
@@ -706,6 +709,7 @@ def train_dygformer(
             model, data, train_csr, train_indices, optimizer, device,
             batch_size=batch_size,
             num_neighbors=num_neighbors,
+            neg_per_positive=neg_per_positive,
             use_amp=use_amp,
             scaler=scaler,
             rng=rng,

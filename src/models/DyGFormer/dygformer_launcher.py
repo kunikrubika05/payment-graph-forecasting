@@ -211,6 +211,7 @@ def run_experiment(args):
         use_amp=not args.no_amp,
         edge_feat_dim=args.edge_feat_dim,
         node_feat_dim=args.node_feat_dim,
+        neg_per_positive=args.neg_per_positive,
     )
     train_time = time.time() - train_start
 
@@ -403,6 +404,11 @@ def main():
         "--edge-feat-dim", type=int, default=2,
         help="Dimension of per-neighbor edge features. "
              "2 = use btc+usd. 0 = time-only mode.",
+    )
+    parser.add_argument(
+        "--neg-per-positive", type=int, default=5,
+        help="Number of random negative edges per positive during training "
+             "(checklist: 5). Eval always uses 50 hist + 50 rand.",
     )
     parser.add_argument(
         "--node-feat-dim", type=int, default=0,
