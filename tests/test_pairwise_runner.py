@@ -11,6 +11,7 @@ def test_pairwise_runner_dry_run(tmp_path):
             output=str(tmp_path),
             data_dir="/tmp/pairmlp_data",
             precompute_dir="/tmp/pairmlp_precompute",
+            precompute_remote_dir=None,
             exp_tag="smoke",
             loss="bpr",
             features=["cn_uu", "aa_uu"],
@@ -24,6 +25,9 @@ def test_pairwise_runner_dry_run(tmp_path):
             seed=42,
             n_negatives=30,
             upload=False,
+            upload_backend="yadisk",
+            remote_dir=None,
+            token_env="YADISK_TOKEN",
             dry_run=True,
             no_amp=False,
         )
@@ -32,6 +36,7 @@ def test_pairwise_runner_dry_run(tmp_path):
     assert result["mode"] == "dry_run"
     assert result["n_negatives"] == 30
     assert result["selected_features"] == ["cn_uu", "aa_uu"]
+    assert result["precompute_remote_dir"] is None
 
 
 def test_pairwise_adapter_builds_runner_kwargs():
@@ -52,7 +57,7 @@ def test_pairwise_adapter_builds_runner_kwargs():
         training=TrainingConfig(epochs=5, batch_size=32, lr=1e-3, patience=3, seed=9),
         runtime=RuntimeConfig(dry_run=True),
         upload=UploadConfig(enabled=True),
-        model={"features": ["cn_uu"], "loss": "bce"},
+        model={"features": ["cn_uu"], "loss": "bce", "precompute_remote_dir": "remote/precompute"},
     )
 
     payload = PairwiseMLPAdapter().build_runner_kwargs(spec)
@@ -61,4 +66,5 @@ def test_pairwise_adapter_builds_runner_kwargs():
     assert payload["n_negatives"] == 50
     assert payload["features"] == ["cn_uu"]
     assert payload["loss"] == "bce"
+    assert payload["precompute_remote_dir"] == "remote/precompute"
     assert payload["upload"] is True

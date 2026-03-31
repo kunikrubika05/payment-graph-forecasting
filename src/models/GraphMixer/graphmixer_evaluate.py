@@ -6,7 +6,6 @@ Uses the same protocol as EAGLE and GLFormer:
     - Metrics: MRR, Hits@1, Hits@3, Hits@10
 """
 
-import contextlib
 import logging
 import time
 from typing import Dict
@@ -15,6 +14,10 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from payment_graph_forecasting.training.amp import (
+    amp_enabled_for_device,
+    autocast_context,
+)
 from src.models.GraphMixer.graphmixer import GraphMixerTime
 from src.models.GraphMixer.data_utils import (
     TemporalEdgeData,
@@ -26,13 +29,6 @@ from src.models.data_utils import featurize_neighbors
 from src.baselines.evaluation import compute_ranking_metrics
 
 logger = logging.getLogger(__name__)
-
-
-def _amp_autocast(enabled: bool, device_type: str):
-    """Return AMP autocast context or a no-op context manager."""
-    if enabled and device_type == "cuda":
-        return torch.cuda.amp.autocast()
-    return contextlib.nullcontext()
 
 
 @torch.no_grad()
@@ -78,7 +74,7 @@ def evaluate_tgb_style(
     """
     model.eval()
     rng = np.random.default_rng(seed)
-    amp_enabled = use_amp and device.type == "cuda"
+    amp_enabled = amp_enabled_for_device(use_amp, device)
     K = num_neighbors
     use_edge_feats = model.edge_feat_dim > 0
     use_node_feats = model.node_feat_dim > 0
@@ -143,7 +139,7 @@ def evaluate_tgb_style(
         def _t(arr, dtype=torch.float32):
             return torch.tensor(arr, dtype=dtype, device=device)
 
-        with _amp_autocast(amp_enabled, device.type):
+        with autocast_context(amp_enabled, device.type):
             h_src = model.encode_nodes(
                 _t(src_dt), _t(src_lens, torch.int64),
                 edge_feats=_t(src_ef) if src_ef is not None else None,

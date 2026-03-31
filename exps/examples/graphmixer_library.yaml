@@ -36,5 +36,3 @@ runtime:
 
 upload:
   enabled: false
-  backend: yadisk
-  remote_dir: orbitaal_processed/experiments/example_graphmixer

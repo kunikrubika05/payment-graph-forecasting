@@ -23,6 +23,7 @@ from payment_graph_forecasting.evaluation.ranking_loop import (
     evaluate_ranking_loop,
 )
 from payment_graph_forecasting.training.amp import autocast_context
+from payment_graph_forecasting.training.amp import amp_enabled_for_device
 from payment_graph_forecasting.evaluation.temporal_ranking import (
     conservative_rank_from_scores,
     score_candidate_contexts,
@@ -103,7 +104,7 @@ def evaluate_tgb_style(
     """
     model.eval()
     rng = np.random.RandomState(seed)
-    amp_enabled = use_amp and device.type == "cuda"
+    amp_enabled = amp_enabled_for_device(use_amp, device)
     K = num_neighbors
     use_edge_feats = model.edge_feat_dim > 0
     use_node_feats = model.node_feat_dim > 0

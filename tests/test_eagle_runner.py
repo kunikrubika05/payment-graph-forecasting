@@ -17,13 +17,25 @@ def test_eagle_arg_parser_supports_dry_run():
 
 def test_eagle_runner_dry_run_returns_payload(tmp_path):
     args = Namespace(
+        data_source="stream_graph",
+        raw_path=None,
+        raw_remote_path=None,
         parquet_path="/tmp/stream.parquet",
+        parquet_remote_path=None,
         features_path="/tmp/features.parquet",
+        features_remote_path=None,
         node_mapping_path=None,
+        node_mapping_remote_path=None,
+        data_backend="yadisk",
+        data_cache_dir=None,
+        data_token_env="YADISK_TOKEN",
         fraction=0.1,
         train_ratio=0.7,
         val_ratio=0.15,
         output=str(tmp_path),
+        device="cpu",
+        upload=False,
+        remote_dir=None,
         epochs=1,
         batch_size=4,
         lr=1e-3,
@@ -46,4 +58,5 @@ def test_eagle_runner_dry_run_returns_payload(tmp_path):
     result = run_eagle_experiment(args)
     assert result["mode"] == "dry_run"
     assert result["parquet_path"] == "/tmp/stream.parquet"
+    assert result["parquet_remote_path"] is None
     assert result["features_path"] == "/tmp/features.parquet"

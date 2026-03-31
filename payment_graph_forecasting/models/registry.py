@@ -6,13 +6,17 @@ from payment_graph_forecasting.models.base import BaseModelAdapter
 from payment_graph_forecasting.models.eagle import EAGLEAdapter
 from payment_graph_forecasting.models.glformer import GLFormerAdapter
 from payment_graph_forecasting.models.graphmixer import GraphMixerAdapter
+from payment_graph_forecasting.models.hyperevent import HyperEventAdapter
 from payment_graph_forecasting.models.pairwise_mlp import PairwiseMLPAdapter
+from payment_graph_forecasting.models.sg_graphmixer import SGGraphMixerAdapter
 
 
 MODEL_REGISTRY: dict[str, BaseModelAdapter] = {
     "graphmixer": GraphMixerAdapter(),
     "eagle": EAGLEAdapter(),
     "glformer": GLFormerAdapter(),
+    "hyperevent": HyperEventAdapter(),
+    "sg_graphmixer": SGGraphMixerAdapter(),
     "pairwise_mlp": PairwiseMLPAdapter(),
 }
 

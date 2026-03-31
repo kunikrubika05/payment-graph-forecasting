@@ -25,6 +25,7 @@ def build_pairwise_mlp_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=str, default="/tmp/pairmlp_results")
     parser.add_argument("--data-dir", type=str, default="/tmp/pairmlp_data")
     parser.add_argument("--precompute-dir", type=str, default="/tmp/pairmlp_precompute")
+    parser.add_argument("--precompute-remote-dir", type=str, default=None)
     parser.add_argument("--exp-tag", type=str, default="")
     parser.add_argument("--loss", type=str, default="bpr")
     parser.add_argument("--features", nargs="*", default=None)
@@ -38,6 +39,9 @@ def build_pairwise_mlp_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n-negatives", type=int, default=100)
     parser.add_argument("--upload", action="store_true")
+    parser.add_argument("--upload-backend", type=str, default="yadisk")
+    parser.add_argument("--remote-dir", type=str, default=None)
+    parser.add_argument("--token-env", type=str, default="YADISK_TOKEN")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -68,6 +72,9 @@ def run_pairwise_mlp_experiment(args: argparse.Namespace):
         local_data_dir=args.data_dir,
         local_precompute_dir=args.precompute_dir,
         local_output_dir=args.output,
+        remote_precompute_dir=args.precompute_remote_dir,
+        remote_results_root=args.remote_dir,
+        token_env=args.token_env,
         upload=args.upload,
     )
     output_dir = os.path.join(cfg.local_output_dir, cfg.exp_name)
@@ -81,9 +88,11 @@ def run_pairwise_mlp_experiment(args: argparse.Namespace):
             loss=args.loss,
             n_negatives=args.n_negatives,
             selected_features=cfg.selected_feature_names,
+            precompute_remote_dir=args.precompute_remote_dir,
+            remote_dir=args.remote_dir,
         )
 
-    token = os.environ.get("YADISK_TOKEN", "")
+    token = os.environ.get(args.token_env, "")
     run_experiment(cfg, token)
 
     summary_path = os.path.join(output_dir, "summary.json")

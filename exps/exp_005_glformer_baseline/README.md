@@ -35,13 +35,15 @@ YADISK_TOKEN="..." PYTHONPATH=. python scripts/slice_stream_graph.py \
     --start 2020-07-01 --end 2020-07-07 \
     --output /tmp/stream_graph_1week.parquet
 
-# 2. Run baseline
-PYTHONPATH=. python src/models/GLFormer/glformer_launcher.py \
-    --parquet-path /tmp/stream_graph_1week.parquet \
-    --epochs 10 --batch-size 200 --num-neighbors 20 \
-    --output /tmp/exp_005_results \
-    2>&1 | tee /tmp/exp_005.log
+# 2. Run baseline through the package-facing GLFormer path
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    --config exps/examples/glformer_library.yaml --dry-run
 ```
+
+Note:
+- this experiment note is historical;
+- if the experiment is re-run, prefer a dedicated YAML spec under `exps/` and
+  the package launcher instead of the old `src/models/GLFormer/glformer_launcher.py`.
 
 ## Results
 

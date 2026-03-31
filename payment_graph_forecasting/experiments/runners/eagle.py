@@ -14,10 +14,9 @@ import torch
 from payment_graph_forecasting.experiments.runner_utils import (
     attach_file_logger,
     configure_root_logging,
-    describe_device,
+    describe_runtime,
     ensure_output_dir,
-    maybe_upload_output,
-    resolve_device,
+    maybe_upload_from_args,
     save_json,
     save_training_curves,
 )
@@ -26,25 +25,38 @@ from payment_graph_forecasting.experiments.results import (
     build_final_results,
 )
 from payment_graph_forecasting.evaluation.api import evaluate_eagle_model
+from payment_graph_forecasting.infra.datasets import resolve_stream_graph_dataset
 from payment_graph_forecasting.training.api import train_eagle_model
 from src.models.EAGLE.data_utils import TemporalCSR, load_stream_graph_data
 
 logger = configure_root_logging()
-
-YADISK_EXPERIMENTS_BASE = "orbitaal_processed/experiments/exp_sg_eagle"
 
 
 def build_eagle_arg_parser() -> argparse.ArgumentParser:
     """Build the EAGLE CLI parser."""
 
     parser = argparse.ArgumentParser(description="EAGLE temporal link prediction on stream graphs")
-    parser.add_argument("--parquet-path", type=str, required=True)
+    parser.add_argument("--data-source", type=str, default="stream_graph")
+    parser.add_argument("--raw-path", type=str, default=None)
+    parser.add_argument("--raw-remote-path", type=str, default=None)
+    parser.add_argument("--parquet-path", type=str, default=None)
+    parser.add_argument("--parquet-remote-path", type=str, default=None)
     parser.add_argument("--features-path", type=str, default=None)
+    parser.add_argument("--features-remote-path", type=str, default=None)
     parser.add_argument("--node-mapping-path", type=str, default=None)
+    parser.add_argument("--node-mapping-remote-path", type=str, default=None)
+    parser.add_argument("--data-backend", type=str, default="yadisk")
+    parser.add_argument("--data-cache-dir", type=str, default=None)
+    parser.add_argument("--data-token-env", type=str, default="YADISK_TOKEN")
     parser.add_argument("--fraction", type=float, default=None)
     parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--val-ratio", type=float, default=0.15)
     parser.add_argument("--output", type=str, default="/tmp/eagle_results")
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--upload", action="store_true")
+    parser.add_argument("--upload-backend", type=str, default="yadisk")
+    parser.add_argument("--remote-dir", type=str, default=None)
+    parser.add_argument("--token-env", type=str, default="YADISK_TOKEN")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=200)
     parser.add_argument("--lr", type=float, default=0.001)
@@ -110,7 +122,10 @@ def _build_data_summary(data, train_mask, val_mask, test_mask):
 def run_eagle_experiment(args: argparse.Namespace):
     """Run a full EAGLE experiment using the new package runner."""
 
-    parquet_name = Path(args.parquet_path).stem
+    parquet_ref = args.parquet_path or args.parquet_remote_path
+    if parquet_ref is None:
+        raise ValueError("EAGLE requires either --parquet-path or --parquet-remote-path")
+    parquet_name = Path(parquet_ref).stem
     frac_str = f"f{int(args.fraction * 100)}" if args.fraction else "full"
     exp_name = f"eagle_{parquet_name}_{frac_str}"
     output_dir = os.path.join(args.output, exp_name)
@@ -121,9 +136,19 @@ def run_eagle_experiment(args: argparse.Namespace):
         return build_dry_run_result(
             experiment=exp_name,
             output_dir=output_dir,
+            data_source=args.data_source,
+            raw_path=args.raw_path,
+            raw_remote_path=args.raw_remote_path,
             parquet_path=args.parquet_path,
+            parquet_remote_path=args.parquet_remote_path,
             features_path=args.features_path,
+            features_remote_path=args.features_remote_path,
+            node_mapping_path=args.node_mapping_path,
+            node_mapping_remote_path=args.node_mapping_remote_path,
+            device=getattr(args, "device", "auto"),
             fraction=args.fraction,
+            upload=bool(getattr(args, "upload", False)),
+            remote_dir=getattr(args, "remote_dir", None),
             n_negatives=n_negatives,
         )
 
@@ -131,21 +156,47 @@ def run_eagle_experiment(args: argparse.Namespace):
     ensure_output_dir(output_dir)
     attach_file_logger(output_dir)
 
-    device = resolve_device()
+    runtime = describe_runtime(getattr(args, "device", "auto"), amp=not getattr(args, "no_amp", False))
+    device = runtime.device
+
+    resolved_data = resolve_stream_graph_dataset(
+        type(
+            "RunnerDataConfig",
+            (),
+            {
+                "source": getattr(args, "data_source", "stream_graph"),
+                "raw_path": getattr(args, "raw_path", None),
+                "raw_remote_path": getattr(args, "raw_remote_path", None),
+                "parquet_path": args.parquet_path,
+                "parquet_remote_path": getattr(args, "parquet_remote_path", None),
+                "features_path": args.features_path,
+                "features_remote_path": getattr(args, "features_remote_path", None),
+                "node_mapping_path": args.node_mapping_path,
+                "node_mapping_remote_path": getattr(args, "node_mapping_remote_path", None),
+                "download_backend": getattr(args, "data_backend", "yadisk"),
+                "cache_dir": getattr(args, "data_cache_dir", None),
+                "token_env": getattr(args, "data_token_env", "YADISK_TOKEN"),
+                "extra": {},
+            },
+        )()
+    )
+    parquet_path = resolved_data.parquet_path
+    features_path = resolved_data.features_path
+    node_mapping_path = resolved_data.node_mapping_path
 
     data_start = time.time()
     data, train_mask, val_mask, test_mask = load_stream_graph_data(
-        args.parquet_path,
+        parquet_path,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         undirected=True,
         fraction=args.fraction,
-        features_path=args.features_path,
+        features_path=features_path,
     )
     data_time = time.time() - data_start
     save_json(os.path.join(output_dir, "data_summary.json"), _build_data_summary(data, train_mask, val_mask, test_mask))
 
-    active_nodes = _compute_active_nodes(args.node_mapping_path, data, train_mask, is_undirected=True)
+    active_nodes = _compute_active_nodes(node_mapping_path, data, train_mask, is_undirected=True)
     train_neighbors = _build_train_neighbors(data, train_mask, is_undirected=True)
 
     node_feat_dim = args.node_feat_dim
@@ -242,9 +293,15 @@ def run_eagle_experiment(args: argparse.Namespace):
             "total_sec": time.time() - total_start,
         },
         args=vars(args),
-        device_info=describe_device(device),
+        device_info={
+            "device": runtime.resolved_device,
+            "requested_device": runtime.requested_device,
+            "cuda_available": runtime.cuda_available,
+            "amp_enabled": runtime.amp_enabled,
+            "gpu_name": runtime.gpu_name,
+        },
         extra={
-            "parquet_path": args.parquet_path,
+            "parquet_path": parquet_path,
             "fraction": args.fraction,
             "features_path": args.features_path,
             "val_metrics": val_metrics,
@@ -253,11 +310,8 @@ def run_eagle_experiment(args: argparse.Namespace):
     )
     save_json(os.path.join(output_dir, "final_results.json"), final_results)
 
-    if maybe_upload_output(output_dir, f"{YADISK_EXPERIMENTS_BASE}/{exp_name}"):
-        try:
-            logger.info("Uploaded results to %s", f"{YADISK_EXPERIMENTS_BASE}/{exp_name}")
-        except Exception as exc:
-            logger.error("Upload failed: %s", exc)
+    if maybe_upload_from_args(output_dir, args, experiment_name=exp_name, logger=logger):
+        logger.info("Uploaded results for %s", exp_name)
 
     return final_results
 

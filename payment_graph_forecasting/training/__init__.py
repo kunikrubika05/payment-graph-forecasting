@@ -5,6 +5,8 @@ from payment_graph_forecasting.training.api import (
     train_eagle_model,
     train_glformer_model,
     train_graphmixer_model,
+    train_hyperevent_model,
+    train_sg_graphmixer_model,
 )
 
 __all__ = [
@@ -12,4 +14,6 @@ __all__ = [
     "train_graphmixer_model",
     "train_eagle_model",
     "train_glformer_model",
+    "train_hyperevent_model",
+    "train_sg_graphmixer_model",
 ]

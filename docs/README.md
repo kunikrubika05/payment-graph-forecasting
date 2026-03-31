@@ -1,5 +1,40 @@
 # Documentation
 
+## Current package-facing surface
+
+The active library-facing API is `payment_graph_forecasting.*`.
+
+Key package areas:
+
+| Package | Purpose |
+| --- | --- |
+| `payment_graph_forecasting.config` | Typed experiment specs and YAML loading |
+| `payment_graph_forecasting.models` | Library model exports and adapters |
+| `payment_graph_forecasting.training` | Stable training wrappers |
+| `payment_graph_forecasting.evaluation` | Stable evaluation wrappers |
+| `payment_graph_forecasting.experiments` | Unified launcher and library runners |
+| `payment_graph_forecasting.infra` | Runtime / device / extension-build / upload infrastructure |
+
+Currently supported library model variants:
+
+- `graphmixer`
+- `sg_graphmixer`
+- `eagle`
+- `glformer`
+- `hyperevent`
+- `pairwise_mlp`
+
+Reference YAML specs live in `exps/examples/`.
+
+Current package-facing example specs:
+
+- `graphmixer_library.yaml`
+- `sg_graphmixer_library.yaml`
+- `eagle_library.yaml`
+- `glformer_library.yaml`
+- `hyperevent_library.yaml`
+- `pairwise_mlp_library.yaml`
+
 ## Modules
 
 ### `src/build_pipeline.py`
@@ -97,3 +132,23 @@ See the main [README.md](../README.md) for detailed column descriptions of:
 - `node_mapping.parquet`
 - Daily snapshot parquet files
 - `daily_stats.csv`
+
+## Refactoring notes
+
+Useful notes for the current refactor:
+
+- [design/sg_graphmixer_vs_graphmixer.md](design/sg_graphmixer_vs_graphmixer.md)
+- [design/tooling_migration_status.md](design/tooling_migration_status.md)
+- [design/refactoring_completion_plan.md](design/refactoring_completion_plan.md)
+- [design/legacy_surface_matrix.md](design/legacy_surface_matrix.md)
+- [experiments/cuda_exp_graphmixer_a10.md](experiments/cuda_exp_graphmixer_a10.md)
+
+Team-specific operational context is kept separately in
+[TEAM.md](../TEAM.md) so the library-facing docs stay abstract.
+
+Useful package-facing CLIs:
+
+- `python -m payment_graph_forecasting.experiments.launcher`
+- `python -m payment_graph_forecasting.experiments.hpo`
+- `python -m payment_graph_forecasting.infra.extensions`
+- `docs/design/dev_machine_validation_protocol.md`

@@ -66,7 +66,7 @@ print(f'  Compute capability: {torch.cuda.get_device_capability(0)}')
 
 # ── 5. Project dependencies ────────────────────────────────────────────────────
 echo "[5/6] Installing requirements..."
-pip install -r requirements.txt -q
+pip install -e ".[dl,hpo]" -q
 
 # ── 6. C++/CUDA extensions ────────────────────────────────────────────────────
 echo "[6/6] Compiling C++/CUDA extensions (A10, CC 8.6)..."

@@ -3,6 +3,8 @@ from payment_graph_forecasting.training import (
     train_eagle_model,
     train_glformer_model,
     train_graphmixer_model,
+    train_hyperevent_model,
+    train_sg_graphmixer_model,
 )
 
 
@@ -11,6 +13,8 @@ def test_training_api_exports_are_importable():
     assert callable(train_graphmixer_model)
     assert callable(train_eagle_model)
     assert callable(train_glformer_model)
+    assert callable(train_hyperevent_model)
+    assert callable(train_sg_graphmixer_model)
 
 
 def test_train_graphmixer_model_wraps_legacy_function(monkeypatch):
@@ -50,3 +54,42 @@ def test_train_glformer_model_wraps_legacy_function(monkeypatch):
 
     assert result.model == "glformer-model"
     assert result.history["received"] == 3
+
+
+def test_train_glformer_model_dispatches_sampler_backend(monkeypatch):
+    def _fake_train_glformer_cuda(**kwargs):
+        return "glformer-cuda-model", {"train_loss": [0.2], "received": kwargs["sampling_backend"]}
+
+    import src.models.GLFormer_cuda.glformer_train as legacy_train
+
+    monkeypatch.setattr(legacy_train, "train_glformer_cuda", _fake_train_glformer_cuda)
+    result = train_glformer_model(sampling_backend="cpp")
+
+    assert result.model == "glformer-cuda-model"
+    assert result.history["received"] == "cpp"
+
+
+def test_train_hyperevent_model_wraps_legacy_function(monkeypatch):
+    def _fake_train_hyperevent(**kwargs):
+        return "hyperevent-model", {"train_loss": [0.2], "received": kwargs["n_neighbor"]}
+
+    import src.models.HyperEvent.hyperevent_train as legacy_train
+
+    monkeypatch.setattr(legacy_train, "train_hyperevent", _fake_train_hyperevent)
+    result = train_hyperevent_model(n_neighbor=12)
+
+    assert result.model == "hyperevent-model"
+    assert result.history["received"] == 12
+
+
+def test_train_sg_graphmixer_model_wraps_legacy_function(monkeypatch):
+    def _fake_train_graphmixer(**kwargs):
+        return "sg-graphmixer-model", {"train_loss": [0.1], "received": kwargs["n_negatives"]}
+
+    import src.models.sg_graphmixer.train as legacy_train
+
+    monkeypatch.setattr(legacy_train, "train_graphmixer", _fake_train_graphmixer)
+    result = train_sg_graphmixer_model(n_negatives=100)
+
+    assert result.model == "sg-graphmixer-model"
+    assert result.history["received"] == 100

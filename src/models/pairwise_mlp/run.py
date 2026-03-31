@@ -74,12 +74,7 @@ from src.models.pairwise_mlp.features import (
 )
 from src.models.pairwise_mlp.model import build_model
 from src.models.pairwise_mlp.train import train
-from src.yadisk_utils import (
-    create_remote_folder_recursive,
-    download_file,
-    upload_file,
-    upload_directory,
-)
+from src.yadisk_utils import create_remote_folder_recursive, download_file, upload_directory
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +87,11 @@ def ensure_precomputed(precompute_dir: str, cfg: PairMLPConfig, token: str) -> N
     for fname in ["pos_features.npy", "neg_features.npy", "neg_dst.npy", "meta.json"]:
         local = os.path.join(precompute_dir, fname)
         if not os.path.exists(local):
+            if not token:
+                raise RuntimeError(
+                    "PairwiseMLP precomputed artifacts are missing locally and require a "
+                    f"download token via ${cfg.token_env} or an explicit local precompute_dir."
+                )
             remote = f"{cfg.yadisk_precompute_dir}/{fname}"
             print(f"  Downloading {remote} ...", flush=True)
             ok = download_file(remote, local, token)
@@ -301,6 +301,11 @@ def run_experiment(cfg: PairMLPConfig, token: str) -> None:
     print(f"{'='*65}")
 
     if cfg.upload:
+        if not token:
+            raise RuntimeError(
+                "PairwiseMLP result upload was requested but no token was provided via "
+                f"${cfg.token_env}."
+            )
         print("\nUploading results...", flush=True)
         upload_results(out_dir, cfg.yadisk_results_dir, token)
 

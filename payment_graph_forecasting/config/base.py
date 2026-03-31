@@ -21,9 +21,14 @@ class DataConfig:
     """Common data-related options shared across model families."""
 
     source: str = "stream_graph"
+    raw_path: str | None = None
+    raw_remote_path: str | None = None
     parquet_path: str | None = None
+    parquet_remote_path: str | None = None
     features_path: str | None = None
+    features_remote_path: str | None = None
     node_mapping_path: str | None = None
+    node_mapping_remote_path: str | None = None
     period: str | None = None
     fraction: float | None = None
     train_ratio: float = 0.70
@@ -31,6 +36,9 @@ class DataConfig:
     window: int | None = None
     undirected: bool = True
     data_dir: str | None = None
+    download_backend: str = "yadisk"
+    cache_dir: str | None = None
+    token_env: str = "YADISK_TOKEN"
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -98,4 +106,3 @@ class ExperimentSpec:
     @property
     def model_name(self) -> str:
         return self.experiment.model
-

@@ -277,10 +277,10 @@ counts = cn.compute(src, dst)  # [3] int32, точные значения
 
 ```bash
 # C++ бэкенд
-PYTHONPATH=. python src/models/build_ext.py --graph-metrics
+PYTHONPATH=. python -m payment_graph_forecasting.infra.extensions --graph-metrics
 
 # CUDA бэкенд (нужен NVCC)
-TORCH_CUDA_ARCH_LIST="7.0" PYTHONPATH=. python src/models/build_ext.py --graph-metrics-cuda
+TORCH_CUDA_ARCH_LIST="7.0" PYTHONPATH=. python -m payment_graph_forecasting.infra.extensions --graph-metrics-cuda
 # для A10: TORCH_CUDA_ARCH_LIST="8.6"
 
 # Тесты

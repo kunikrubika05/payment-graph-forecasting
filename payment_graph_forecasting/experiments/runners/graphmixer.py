@@ -12,10 +12,9 @@ import torch
 from payment_graph_forecasting.experiments.runner_utils import (
     attach_file_logger,
     configure_root_logging,
-    describe_device,
+    describe_runtime,
     ensure_output_dir,
-    maybe_upload_output,
-    resolve_device,
+    maybe_upload_from_args,
     save_json,
     save_training_curves,
 )
@@ -30,8 +29,6 @@ from src.models.data_utils import TemporalCSR, prepare_sliding_window
 
 logger = configure_root_logging()
 
-YADISK_EXPERIMENTS_BASE = "orbitaal_processed/experiments/exp_004_graphmixer"
-
 
 def build_graphmixer_arg_parser() -> argparse.ArgumentParser:
     """Build the GraphMixer CLI parser."""
@@ -41,6 +38,11 @@ def build_graphmixer_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--window", type=int, default=7)
     parser.add_argument("--output", type=str, default="/tmp/graphmixer_results")
     parser.add_argument("--data-dir", type=str, default="/tmp/graphmixer_data")
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--upload", action="store_true")
+    parser.add_argument("--upload-backend", type=str, default="yadisk")
+    parser.add_argument("--remote-dir", type=str, default=None)
+    parser.add_argument("--token-env", type=str, default="YADISK_TOKEN")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=600)
     parser.add_argument("--lr", type=float, default=0.0001)
@@ -86,8 +88,11 @@ def run_graphmixer_experiment(args: argparse.Namespace):
             experiment=exp_name,
             output_dir=output_dir,
             period=args.period,
+            device=getattr(args, "device", "auto"),
             window=args.window,
             num_neighbors=args.num_neighbors,
+            upload=bool(getattr(args, "upload", False)),
+            remote_dir=getattr(args, "remote_dir", None),
             n_hist_neg=n_hist_neg,
             n_random_neg=n_random_neg,
         )
@@ -101,7 +106,8 @@ def run_graphmixer_experiment(args: argparse.Namespace):
     logger.info("Args: %s", vars(args))
     logger.info("=" * 60)
 
-    device = resolve_device()
+    runtime = describe_runtime(getattr(args, "device", "auto"), amp=not getattr(args, "no_amp", False))
+    device = runtime.device
     logger.info("Device: %s", device)
     if device.type == "cuda":
         logger.info("GPU: %s", torch.cuda.get_device_name(0))
@@ -178,7 +184,13 @@ def run_graphmixer_experiment(args: argparse.Namespace):
             "total_sec": total_time,
         },
         args=vars(args),
-        device_info=describe_device(device),
+        device_info={
+            "device": runtime.resolved_device,
+            "requested_device": runtime.requested_device,
+            "cuda_available": runtime.cuda_available,
+            "amp_enabled": runtime.amp_enabled,
+            "gpu_name": runtime.gpu_name,
+        },
         extra={
             "period": args.period,
             "test_metrics": test_metrics,
@@ -186,14 +198,9 @@ def run_graphmixer_experiment(args: argparse.Namespace):
     )
     save_json(os.path.join(output_dir, "final_results.json"), final_results)
 
-    logger.info("Step 4: Uploading results to Yandex.Disk...")
-    if maybe_upload_output(output_dir, f"{YADISK_EXPERIMENTS_BASE}/{exp_name}"):
-        try:
-            logger.info("Uploaded results to %s", f"{YADISK_EXPERIMENTS_BASE}/{exp_name}")
-        except Exception as exc:
-            logger.error("Upload failed: %s", exc)
-    else:
-        logger.warning("YADISK_TOKEN not set — skipping upload. Results saved locally: %s", output_dir)
+    logger.info("Step 4: Uploading results...")
+    if maybe_upload_from_args(output_dir, args, experiment_name=exp_name, logger=logger):
+        logger.info("Uploaded results for %s", exp_name)
 
     return final_results
 

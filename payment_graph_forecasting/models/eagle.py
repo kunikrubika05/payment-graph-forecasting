@@ -25,9 +25,18 @@ class EAGLEAdapter(BaseRunnerAdapter):
     def build_runner_kwargs(self, spec: ExperimentSpec) -> dict[str, object]:
         sampling = sampling_strategy_from_config(spec.sampling)
         return {
+            "data_source": spec.data.source,
+            "raw_path": spec.data.raw_path,
+            "raw_remote_path": spec.data.raw_remote_path,
             "parquet_path": spec.data.parquet_path,
+            "parquet_remote_path": spec.data.parquet_remote_path,
             "features_path": spec.data.features_path,
+            "features_remote_path": spec.data.features_remote_path,
             "node_mapping_path": spec.data.node_mapping_path,
+            "node_mapping_remote_path": spec.data.node_mapping_remote_path,
+            "data_backend": spec.data.download_backend,
+            "data_cache_dir": spec.data.cache_dir,
+            "data_token_env": spec.data.token_env,
             "fraction": spec.data.fraction,
             "train_ratio": spec.data.train_ratio,
             "val_ratio": spec.data.val_ratio,

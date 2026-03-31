@@ -1,5 +1,12 @@
 # EAGLE: Expressive dynamics-Aware Graph LEarning
 
+> Historical literature/design note.
+> Operational commands in this file are not the canonical project surface.
+> For actual runs, use the package-facing docs in `README.md`, `docs/README.md`,
+> `payment_graph_forecasting.experiments.launcher`,
+> `payment_graph_forecasting.experiments.hpo`, and the YAML specs in
+> `exps/examples/`.
+
 ## Источник
 
 **Статья:** Yue et al., "Towards Expressive dynamics-Aware Graph LEarning", 2024

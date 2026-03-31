@@ -175,20 +175,82 @@ You can also launch experiments from YAML directly:
 The new package path is `payment_graph_forecasting.*`. Legacy `src.*` imports
 still work through compatibility adapters while the refactor is in progress.
 
+Current library-facing model names:
+
+- `graphmixer`
+- `sg_graphmixer`
+- `eagle`
+- `glformer`
+- `hyperevent`
+- `pairwise_mlp`
+
+`graphmixer` and `sg_graphmixer` intentionally remain separate variants. They
+belong to the same GraphMixer family, but correspond to different data and
+evaluation regimes.
+
+Example specs currently live in `exps/examples/`:
+
+- `graphmixer_library.yaml`
+- `sg_graphmixer_library.yaml`
+- `eagle_library.yaml`
+- `glformer_library.yaml`
+- `hyperevent_library.yaml`
+- `pairwise_mlp_library.yaml`
+
+Examples:
+
+```bash
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    --config exps/examples/graphmixer_library.yaml --dry-run
+
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    --config exps/examples/sg_graphmixer_library.yaml --dry-run
+
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    --config exps/examples/eagle_library.yaml --dry-run
+
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    --config exps/examples/pairwise_mlp_library.yaml --dry-run
+```
+
+Optional compiled extensions now also have a package-facing entrypoint:
+
+```bash
+# Requires `ninja` in the active environment for actual compilation.
+./venv/bin/python -m payment_graph_forecasting.infra.extensions
+./venv/bin/python -m payment_graph_forecasting.infra.extensions --all --graph-metrics
+```
+
+Legacy `python src/models/build_ext.py ...` remains available as a compatibility
+shim while the refactor is being finalized.
+
 ## Project structure
 
 ```
+payment_graph_forecasting/
+├── config/              # Typed experiment specs and YAML loading
+├── evaluation/          # Stable evaluation wrappers
+├── experiments/         # Unified launcher and library-facing runners
+├── infra/               # Runtime, extension-build, and upload infrastructure
+├── models/              # Library model exports and adapters
+├── sampling/            # Unified sampling config/representation
+└── training/            # Stable training wrappers
 src/
-├── analyze.py          # Exploratory data analysis on CSV samples
-├── build_graphs.py     # PaymentGraph class (PyG-compatible, pickle format)
-├── build_pipeline.py   # Main pipeline: download → mapping → snapshots → upload
+├── analyze.py           # Exploratory data analysis on CSV samples
+├── build_graphs.py      # PaymentGraph class (PyG-compatible, pickle format)
+├── build_pipeline.py    # Main pipeline: download → mapping → snapshots → upload
 ├── build_stream_graph.py # Stream graph pipeline: download → extract → process → upload
-├── compute_features.py # Graph-level and node-level feature computation
-└── visualize.py        # Visualization scripts
+├── compute_features.py  # Graph-level and node-level feature computation
+├── baselines/           # Legacy baseline pipelines
+└── models/              # Legacy model implementations and migration shims
+docs/
+├── design/              # Architecture / refactoring notes
+└── experiments/         # Notes about legacy experiment branches
 tests/
-├── test_pipeline.py          # Pipeline tests (11 tests)
-├── test_compute_features.py  # Feature computation tests (36 tests)
-├── test_baselines.py         # Baseline pipeline tests (35 tests)
-├── test_models.py            # DL models tests (42 tests)
-└── test_stream_graph.py      # Stream graph pipeline tests (16 tests)
+├── test_library_api.py       # Library surface / launcher tests
+├── test_model_adapter_base.py # Adapter contract tests
+├── test_*_runner.py          # Runner-level smoke tests
+└── ...
 ```
+
+New library-facing work should go through `payment_graph_forecasting.*`.

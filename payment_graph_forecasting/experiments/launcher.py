@@ -7,14 +7,23 @@ from pathlib import Path
 
 from payment_graph_forecasting.config.base import ExperimentSpec
 from payment_graph_forecasting.config.yaml_io import load_experiment_spec
+from payment_graph_forecasting.models.base import ModelExecutionPlan
 from payment_graph_forecasting.models.registry import get_model_adapter
+
+
+def build_execution_plan(spec: ExperimentSpec) -> ModelExecutionPlan:
+    """Resolve a model adapter and build its canonical execution plan."""
+
+    adapter = get_model_adapter(spec.model_name)
+    return adapter.build_execution_plan(spec)
 
 
 def launch_experiment(spec: ExperimentSpec):
     """Resolve a model adapter and launch an experiment."""
 
-    adapter = get_model_adapter(spec.model_name)
-    return adapter.run(spec)
+    plan = build_execution_plan(spec)
+    adapter = get_model_adapter(plan.model_name)
+    return adapter.execute_plan(plan)
 
 
 def main(argv: list[str] | None = None) -> int:

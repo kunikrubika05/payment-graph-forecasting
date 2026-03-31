@@ -34,7 +34,31 @@ def evaluate_eagle_model(**kwargs: Any) -> EvaluationRunResult:
 def evaluate_glformer_model(**kwargs: Any) -> EvaluationRunResult:
     """Evaluate GLFormer through the stable library API."""
 
+    if kwargs.get("sampler") is not None:
+        from src.models.GLFormer_cuda.glformer_evaluate import evaluate_tgb_style
+
+        metrics = evaluate_tgb_style(**kwargs)
+        return EvaluationRunResult(metrics=metrics)
+
     from src.models.GLFormer.glformer_evaluate import evaluate_tgb_style
+
+    metrics = evaluate_tgb_style(**kwargs)
+    return EvaluationRunResult(metrics=metrics)
+
+
+def evaluate_hyperevent_model(**kwargs: Any) -> EvaluationRunResult:
+    """Evaluate HyperEvent through the stable library API."""
+
+    from src.models.HyperEvent.hyperevent_evaluate import evaluate_tgb_style
+
+    metrics = evaluate_tgb_style(**kwargs)
+    return EvaluationRunResult(metrics=metrics)
+
+
+def evaluate_sg_graphmixer_model(**kwargs: Any) -> EvaluationRunResult:
+    """Evaluate the sg-baselines-aligned GraphMixer through the stable library API."""
+
+    from src.models.sg_graphmixer.evaluate import evaluate_tgb_style
 
     metrics = evaluate_tgb_style(**kwargs)
     return EvaluationRunResult(metrics=metrics)

@@ -1,0 +1,44 @@
+experiment:
+  name: glformer_library_smoke
+  model: glformer
+  tags: [example, library]
+
+data:
+  source: stream_graph
+  parquet_path: /tmp/sg_baselines_data/stream_graph.parquet
+  train_ratio: 0.7
+  val_ratio: 0.15
+
+sampling:
+  strategy: tgb_mixed
+  num_neighbors: 20
+  n_random_neg: 50
+  n_hist_neg: 50
+  backend: auto
+
+training:
+  epochs: 5
+  batch_size: 200
+  lr: 0.0001
+  patience: 20
+  seed: 42
+  weight_decay: 0.00001
+  hidden_dim: 100
+  dropout: 0.1
+
+runtime:
+  device: cpu
+  amp: true
+  dry_run: true
+  output_dir: /tmp/glformer_results
+
+upload:
+  enabled: false
+
+model:
+  edge_feat_dim: 2
+  node_feat_dim: 0
+  num_glformer_layers: 2
+  channel_expansion: 4.0
+  use_cooccurrence: false
+  cooc_dim: 16

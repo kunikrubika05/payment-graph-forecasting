@@ -5,6 +5,8 @@ from payment_graph_forecasting.evaluation.api import (
     evaluate_eagle_model,
     evaluate_glformer_model,
     evaluate_graphmixer_model,
+    evaluate_hyperevent_model,
+    evaluate_sg_graphmixer_model,
 )
 
 __all__ = [
@@ -12,4 +14,6 @@ __all__ = [
     "evaluate_graphmixer_model",
     "evaluate_eagle_model",
     "evaluate_glformer_model",
+    "evaluate_hyperevent_model",
+    "evaluate_sg_graphmixer_model",
 ]

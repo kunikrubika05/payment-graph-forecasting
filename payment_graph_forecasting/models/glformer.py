@@ -17,12 +17,22 @@ class GLFormerAdapter(BaseRunnerAdapter):
     def build_runner_kwargs(self, spec: ExperimentSpec) -> dict[str, object]:
         sampling = sampling_strategy_from_config(spec.sampling)
         return {
+            "data_source": spec.data.source,
+            "raw_path": spec.data.raw_path,
+            "raw_remote_path": spec.data.raw_remote_path,
             "parquet_path": spec.data.parquet_path,
+            "parquet_remote_path": spec.data.parquet_remote_path,
             "train_ratio": spec.data.train_ratio,
             "val_ratio": spec.data.val_ratio,
+            "sampling_backend": spec.sampling.backend,
             "node_feats_path": spec.data.features_path,
+            "node_feats_remote_path": spec.data.features_remote_path,
             "adj_path": spec.model.get("adj_path"),
             "node_mapping_path": spec.data.node_mapping_path,
+            "node_mapping_remote_path": spec.data.node_mapping_remote_path,
+            "data_backend": spec.data.download_backend,
+            "data_cache_dir": spec.data.cache_dir,
+            "data_token_env": spec.data.token_env,
             "use_cooccurrence": bool(spec.model.get("use_cooccurrence", False)),
             "edge_feat_dim": int(spec.model.get("edge_feat_dim", 2)),
             "node_feat_dim": int(spec.model.get("node_feat_dim", 0)),

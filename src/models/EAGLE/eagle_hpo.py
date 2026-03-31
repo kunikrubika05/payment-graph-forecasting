@@ -20,6 +20,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from payment_graph_forecasting.experiments.hpo_artifacts import (
+    write_best_training_artifacts,
+)
 
 try:
     import optuna
@@ -326,28 +329,15 @@ def main():
     with open(os.path.join(args.output, "hpo_results.json"), "w") as f:
         json.dump(results, f, indent=2)
 
-    train_cmd = (
-        f"YADISK_TOKEN=\"...\" PYTHONPATH=. python src/models/EAGLE/eagle_launcher.py \\\n"
-        f"    --parquet-path {args.parquet_path} --epochs 100 \\\n"
+    artifact_paths = write_best_training_artifacts(
+        "eagle",
+        args,
+        best.params,
+        output_dir=args.output,
     )
-    if args.fraction is not None:
-        train_cmd += f"    --fraction {args.fraction} \\\n"
-    if args.features_path is not None:
-        train_cmd += f"    --features-path {args.features_path} \\\n"
-    if args.node_mapping_path is not None:
-        train_cmd += f"    --node-mapping-path {args.node_mapping_path} \\\n"
-    for key, value in best.params.items():
-        flag = key.replace("_", "-")
-        train_cmd += f"    --{flag} {value} \\\n"
-    train_cmd += f"    --output /tmp/eagle_results 2>&1 | tee /tmp/eagle_train.log"
-
-    logger.info("Recommended training command:\n%s", train_cmd)
-
-    cmd_path = os.path.join(args.output, "best_train_command.sh")
-    with open(cmd_path, "w") as f:
-        f.write("#!/bin/bash\n")
-        f.write(train_cmd + "\n")
-    logger.info("Command saved to %s", cmd_path)
+    logger.info("Package-facing best spec saved to %s", artifact_paths["spec_path"])
+    logger.info("Recommended training command:\n%s", artifact_paths["command"])
+    logger.info("Command saved to %s", artifact_paths["command_path"])
 
 
 if __name__ == "__main__":

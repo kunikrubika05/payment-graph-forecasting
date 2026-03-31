@@ -29,6 +29,11 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from payment_graph_forecasting.training.amp import autocast_context
+from payment_graph_forecasting.training.amp import (
+    amp_enabled_for_device,
+    create_grad_scaler,
+    seed_torch,
+)
 from payment_graph_forecasting.evaluation.temporal_ranking import (
     conservative_rank_from_scores,
     score_candidate_contexts,
@@ -598,9 +603,7 @@ def train_glformer(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     rng = np.random.default_rng(seed)
-    torch.manual_seed(seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed(seed)
+    seed_torch(seed, device)
 
     train_csr = build_temporal_csr(data, train_mask)
     full_csr = build_temporal_csr(data, train_mask | val_mask)
@@ -630,8 +633,8 @@ def train_glformer(
     optimizer = torch.optim.Adam(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
-    amp_enabled = use_amp and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    amp_enabled = amp_enabled_for_device(use_amp, device)
+    scaler = create_grad_scaler(amp_enabled)
 
     train_indices = np.where(train_mask)[0]
     val_indices = np.where(val_mask)[0]

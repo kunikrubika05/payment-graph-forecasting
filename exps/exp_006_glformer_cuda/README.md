@@ -32,14 +32,14 @@ verify that metrics match the baseline (exp_005).
 
 ```bash
 # (after slicing the graph — see exp_005 README)
-
-PYTHONPATH=. python src/models/GLFormer_cuda/glformer_launcher.py \
-    --parquet-path /tmp/stream_graph_1week.parquet \
-    --epochs 10 --batch-size 200 --num-neighbors 20 \
-    --sampling-backend auto \
-    --output /tmp/exp_006_results \
-    2>&1 | tee /tmp/exp_006.log
+# Re-run this through the package-facing GLFormer path with sampling backend.
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    --config exps/examples/glformer_library.yaml --dry-run
 ```
+
+If this experiment is revived, encode the CUDA sampler choice in YAML via
+`sampling.backend: cuda|cpp|python` under the existing `glformer` model instead
+of using `src/models/GLFormer_cuda/glformer_launcher.py` directly.
 
 ## Expected outcome
 

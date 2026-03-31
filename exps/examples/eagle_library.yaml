@@ -1,0 +1,46 @@
+experiment:
+  name: eagle_library_smoke
+  model: eagle
+  tags: [example, library]
+
+data:
+  source: stream_graph
+  parquet_path: /tmp/sg_baselines_data/stream_graph.parquet
+  features_path: /tmp/sg_baselines_data/features_10.parquet
+  node_mapping_path: /tmp/sg_baselines_data/node_mapping_10.npy
+  fraction: 0.10
+  train_ratio: 0.7
+  val_ratio: 0.15
+
+sampling:
+  strategy: tgb_mixed
+  num_neighbors: 20
+  n_random_neg: 50
+  n_hist_neg: 50
+  backend: auto
+
+training:
+  epochs: 5
+  batch_size: 200
+  lr: 0.001
+  patience: 10
+  seed: 42
+  weight_decay: 0.00005
+  hidden_dim: 100
+  dropout: 0.1
+
+runtime:
+  device: cpu
+  amp: true
+  dry_run: true
+  output_dir: /tmp/eagle_results
+
+upload:
+  enabled: false
+
+model:
+  edge_feat_dim: 2
+  node_feat_dim: 15
+  num_mixer_layers: 1
+  token_expansion: 0.5
+  channel_expansion: 4.0
