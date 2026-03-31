@@ -113,8 +113,8 @@ def _get_neighbors(csr, data, nodes, ts_arr, num_neighbors,
     n_nids, neighbor_ts, neighbor_eids, lengths = sample_neighbors_batch(
         csr, nodes, ts_arr, num_neighbors
     )
-    delta_times = np.maximum(
-        ts_arr[:, None] - neighbor_ts, 0.0
+    delta_times = (
+        np.maximum(ts_arr[:, None] - neighbor_ts, 0.0) / 86400.0
     ).astype(np.float32)
 
     for b in range(len(nodes)):
@@ -459,7 +459,7 @@ def validate(
         src_nids, src_nts, src_neids, src_lens = sample_neighbors_batch(
             csr, src_arr, ts_arr, K
         )
-        src_dt = np.maximum(ts_arr[:, None] - src_nts, 0.0).astype(np.float32)
+        src_dt = (np.maximum(ts_arr[:, None] - src_nts, 0.0) / 86400.0).astype(np.float32)
         src_dt[0, src_lens[0]:] = 0.0
 
         src_ef = src_nf = None
@@ -482,7 +482,7 @@ def validate(
             dst_nids_c, dst_nts_c, dst_neids_c, dst_lens_c = sample_neighbors_batch(
                 csr, dst_arr, dst_ts_arr, K
             )
-            dst_dt_c = np.maximum(dst_ts_arr[:, None] - dst_nts_c, 0.0).astype(np.float32)
+            dst_dt_c = (np.maximum(dst_ts_arr[:, None] - dst_nts_c, 0.0) / 86400.0).astype(np.float32)
             dst_dt_c[0, dst_lens_c[0]:] = 0.0
 
             dst_ef_c = dst_nf_c = None
@@ -542,7 +542,7 @@ def train_dygformer(
     output_dir: str,
     device: Optional[torch.device] = None,
     num_epochs: int = 100,
-    batch_size: int = 200,
+    batch_size: int = 4000,
     learning_rate: float = 0.0001,
     weight_decay: float = 1e-5,
     num_neighbors: int = 32,

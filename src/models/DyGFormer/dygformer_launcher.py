@@ -353,7 +353,7 @@ def main():
     )
 
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=200)
+    parser.add_argument("--batch-size", type=int, default=4000)
     parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument(

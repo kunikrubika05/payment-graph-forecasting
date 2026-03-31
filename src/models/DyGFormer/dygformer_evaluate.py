@@ -171,7 +171,7 @@ def evaluate_tgb_style(
         src_nids, src_nts, src_neids, src_lens = sample_neighbors_batch(
             csr, src_arr, ts_arr, K
         )
-        src_dt = np.maximum(ts_arr[:, None] - src_nts, 0.0).astype(np.float32)
+        src_dt = (np.maximum(ts_arr[:, None] - src_nts, 0.0) / 86400.0).astype(np.float32)
         src_dt[0, src_lens[0]:] = 0.0
 
         src_ef = src_nf = None
@@ -194,7 +194,7 @@ def evaluate_tgb_style(
             dst_nids_c, dst_nts_c, dst_neids_c, dst_lens_c = sample_neighbors_batch(
                 csr, dst_arr, dst_ts_arr, K
             )
-            dst_dt_c = np.maximum(dst_ts_arr[:, None] - dst_nts_c, 0.0).astype(np.float32)
+            dst_dt_c = (np.maximum(dst_ts_arr[:, None] - dst_nts_c, 0.0) / 86400.0).astype(np.float32)
             dst_dt_c[0, dst_lens_c[0]:] = 0.0
 
             dst_ef_c = dst_nf_c = None
