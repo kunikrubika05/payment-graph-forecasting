@@ -58,7 +58,7 @@ _To be filled after running._
 
 ## Artifacts on Yandex.Disk
 
-- `orbitaal_processed/experiments/exp_006_glformer/<run_name>/`
+- `orbitaal_processed/experiments/exp_005_glformer_baseline/<run_name>/`
 
 ## Conclusions
 
