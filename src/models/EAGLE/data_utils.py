@@ -143,12 +143,17 @@ def temporal_data_to_edge_data(
         timestamps = timestamps[re_order]
         edge_feats = edge_feats[re_order]
 
-    num_nodes = int(max(src.max(), dst.max())) + 1
-    node_id_map = {i: i for i in range(num_nodes)}
-    reverse_node_map = np.arange(num_nodes, dtype=np.int64)
+    unique_nodes = np.unique(np.concatenate([src, dst])).astype(np.int64)
+    dense_idx = np.arange(len(unique_nodes), dtype=np.int32)
+    src = np.searchsorted(unique_nodes, src).astype(np.int32)
+    dst = np.searchsorted(unique_nodes, dst).astype(np.int32)
+
+    num_nodes = int(len(unique_nodes))
+    node_id_map = {int(orig): int(dense) for dense, orig in enumerate(unique_nodes)}
+    reverse_node_map = unique_nodes.copy()
 
     if external_node_feats is not None:
-        node_feats = external_node_feats
+        node_feats = external_node_feats[reverse_node_map]
         logger.info(
             "Using external node features: shape %s", node_feats.shape,
         )
