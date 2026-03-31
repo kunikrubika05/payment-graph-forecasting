@@ -153,6 +153,15 @@ class PairMLPConfig:
     eval_every:    int       = 2     # epochs between val evaluations
     k_neg_sample:  int       = 0     # subsample K' negatives per step (0 = use all K)
 
+    # --- LR Scheduler ---
+    scheduler:          str   = ""     # "", "cosine", "plateau"
+    scheduler_min_lr:   float = 1e-6   # cosine eta_min / plateau min_lr
+    scheduler_patience: int   = 3      # plateau: epochs without improvement before decay
+    scheduler_factor:   float = 0.5    # plateau: lr multiplier on decay
+
+    # --- Node features ---
+    use_node_features: bool = False    # concat 15-dim src + 15-dim dst to pair features
+
     # --- Eval (identical to sg_baselines) ---
     n_negatives:    int = 100
     max_eval_queries: int = 50_000
@@ -184,9 +193,14 @@ class PairMLPConfig:
 
     @property
     def n_input_features(self) -> int:
-        """Number of features actually fed to the MLP."""
+        """Number of features actually fed to the MLP.
+
+        = n_pair_features + (30 if use_node_features else 0)
+        where n_pair_features is the number of selected pairwise structural features.
+        """
         idx = self.active_feature_indices
-        return len(idx) if idx else N_FEATURES
+        n_pair = len(idx) if idx else N_FEATURES
+        return n_pair + (30 if self.use_node_features else 0)
 
     @property
     def selected_feature_names(self) -> List[str]:
@@ -247,6 +261,11 @@ class PairMLPConfig:
             "patience":               self.patience,
             "n_negatives":            self.n_negatives,
             "max_eval_queries":       self.max_eval_queries,
+            "scheduler":              self.scheduler,
+            "scheduler_min_lr":       self.scheduler_min_lr,
+            "scheduler_patience":     self.scheduler_patience,
+            "scheduler_factor":       self.scheduler_factor,
+            "use_node_features":      self.use_node_features,
             "exp_tag":                self.exp_tag,
             "exp_name":               self.exp_name,
         }

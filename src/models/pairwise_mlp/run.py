@@ -6,38 +6,40 @@ trains PairMLP with the selected loss, evaluates TGB-style, uploads results.
 All experiment variants are controlled by CLI arguments — no code changes needed.
 
 Ablation examples (see FEATURE_NAMES in config.py for indices):
-  # E1: CN only, BPR
-  python run.py --features cn_uu --exp-tag E1
+  # E5: CN only, BPR, cosine scheduler
+  python run.py --features cn_uu --scheduler cosine --exp-tag E5
 
-  # E2: CN + log(CN) + AA, BPR
-  python run.py --features cn_uu log1p_cn_uu aa_uu --exp-tag E2
+  # E6: CN + node features, cosine scheduler
+  python run.py --features cn_uu --use-node-features --scheduler cosine --exp-tag E6
 
-  # E3: all 7 features, BPR (default)
-  python run.py --exp-tag E3
-
-  # E4: all 7 features, BCE
-  python run.py --loss bce --exp-tag E4
-
-  # Custom: directed features only
-  python run.py --features cn_dir aa_dir --exp-tag directed_only
-
-  # Use preset
-  python run.py --features E2 --exp-tag E2_preset
+  # E7: CN + node features, bigger arch, dropout
+  python run.py --features cn_uu --use-node-features --hidden 128 64 32 \\
+      --dropout 0.1 --scheduler cosine --exp-tag E7
 
 Feature selection:
   --features NAME [NAME ...]   — select by name (from FEATURE_NAMES)
   --feature-indices N [N ...]  — select by 0-based column index
   (omit both = use all 7 features)
 
+Scheduler:
+  --scheduler cosine     — CosineAnnealingLR (lr → scheduler-min-lr over n_epochs)
+  --scheduler plateau    — ReduceLROnPlateau on val MRR
+  (omit = no scheduler)
+
+Node features:
+  --use-node-features    — append 15-dim src + 15-dim dst node features
+
+Eval cache sharing:
+  Eval caches are saved to --data-dir keyed by (period, features, split).
+  Parallel experiments with the same feature set share the cache automatically.
+
 Usage:
     YADISK_TOKEN="..." python -u src/models/pairwise_mlp/run.py \\
         --period period_10 \\
-        --precompute-dir /tmp/pairmlp_precompute \\
-        --data-dir /tmp/pairmlp_data \\
-        --output-dir /tmp/pairmlp_results \\
-        --features cn_uu log1p_cn_uu aa_uu \\
-        --loss bpr --exp-tag E2 --upload \\
-        2>&1 | tee /tmp/pairmlp_E2.log
+        --features cn_uu --use-node-features \\
+        --scheduler cosine --hidden 64 32 --dropout 0.1 \\
+        --loss bpr --exp-tag E6 --upload \\
+        2>&1 | tee /tmp/E6.log
 """
 
 import argparse
@@ -111,6 +113,21 @@ def upload_results(out_dir: str, remote_dir: str, token: str) -> None:
 # Main experiment
 # ---------------------------------------------------------------------------
 
+def _eval_cache_path(cfg: PairMLPConfig, split: str) -> str:
+    """Build a deterministic path for the eval feature cache.
+
+    The cache is keyed by (period_label, use_node_features, active_feature_indices, split)
+    so experiments with the same feature set share the cache automatically.
+    """
+    feat_key = f"nf{int(cfg.use_node_features)}"
+    if cfg.active_feature_indices:
+        feat_key += "_" + "_".join(str(i) for i in cfg.active_feature_indices)
+    else:
+        feat_key += "_all"
+    fname = f"eval_cache_{cfg.label}_{split}_{feat_key}.npz"
+    return os.path.join(cfg.local_data_dir, fname)
+
+
 def run_experiment(cfg: PairMLPConfig, token: str) -> None:
     """Full GPU training + evaluation pipeline for one config."""
     out_dir      = os.path.join(cfg.local_output_dir, cfg.exp_name)
@@ -121,13 +138,15 @@ def run_experiment(cfg: PairMLPConfig, token: str) -> None:
         print(f"\nSKIP {cfg.exp_name}: summary.json exists (resume mode)")
         return
 
+    sched_str = f", scheduler={cfg.scheduler}" if cfg.scheduler else ""
+    nf_str    = ", +node_features" if cfg.use_node_features else ""
     print(f"\n{'='*65}")
     print(f"PairMLP — {cfg.exp_name}")
     print(f"  period  : {cfg.period_name} (fraction={cfg.fraction})")
-    print(f"  features: {cfg.selected_feature_names}")
+    print(f"  features: {cfg.selected_feature_names}{nf_str}")
     print(f"  loss    : {cfg.loss.upper()}")
     print(f"  arch    : {cfg.n_input_features} → {cfg.hidden_dims} → 1")
-    print(f"  lr={cfg.lr}, epochs={cfg.n_epochs}, patience={cfg.patience}")
+    print(f"  lr={cfg.lr}, epochs={cfg.n_epochs}, patience={cfg.patience}{sched_str}")
     print(f"{'='*65}")
     t_start = time.time()
 
@@ -168,7 +187,7 @@ def run_experiment(cfg: PairMLPConfig, token: str) -> None:
     del df
 
     node_mapping, adj_dir, adj_undir = load_adjacency(sg_cfg, token)
-    node_idx, _ = load_node_features_sparse(sg_cfg, token)
+    node_idx, node_features_df = load_node_features_sparse(sg_cfg, token)
 
     # CORRECTNESS: node_mapping must equal node_idx (same train set)
     assert np.array_equal(node_idx, node_mapping), (
@@ -195,12 +214,30 @@ def run_experiment(cfg: PairMLPConfig, token: str) -> None:
     w_undir, w_dir     = precompute_aa_weights(adj_undir, deg_undir, adj_dir, deg_dir)
 
     # ------------------------------------------------------------------
-    # [4] Load dataset (with active feature column selection)
+    # [4] Load dataset (with active feature column selection + node features)
     # ------------------------------------------------------------------
     print("\n[4/6] Loading dataset + building model...", flush=True)
+
+    node_features_dense = None
+    if cfg.use_node_features:
+        node_features_dense = node_features_df.values.astype(np.float32)
+        # node_features_dense[i] = 15-dim features for local index i
+        # (safe: node_mapping == node_idx, both sorted identically)
+
+    neg_dst_global = np.load(os.path.join(cfg.precompute_artifact_dir, "neg_dst.npy"))
+    src_local      = np.searchsorted(node_mapping,
+                                     train_edges["src_idx"].values.astype(np.int64))
+    dst_local      = np.searchsorted(node_mapping,
+                                     train_edges["dst_idx"].values.astype(np.int64))
+    neg_dst_local  = np.searchsorted(node_mapping, neg_dst_global)
+
     dataset = load_dataset(
         cfg.precompute_artifact_dir,
         active_feature_indices=cfg.active_feature_indices or None,
+        node_features=node_features_dense,
+        src_local=src_local,
+        dst_local=dst_local,
+        neg_dst_local=neg_dst_local,
     )
 
     model = build_model(
@@ -226,13 +263,16 @@ def run_experiment(cfg: PairMLPConfig, token: str) -> None:
         n_negatives=cfg.n_negatives,
         max_queries=cfg.max_eval_queries,
         active_feature_indices=cfg.active_feature_indices or None,
+        node_features=node_features_dense,
     )
 
     print("\n[5/6] Building eval feature caches...", flush=True)
     val_cache  = build_eval_cache(
-        val_edges,  seed=cfg.val_seed,  split_name="val",  **cache_kwargs)
+        val_edges,  seed=cfg.val_seed,  split_name="val",
+        cache_path=_eval_cache_path(cfg, "val"),  **cache_kwargs)
     test_cache = build_eval_cache(
-        test_edges, seed=cfg.test_seed, split_name="test", **cache_kwargs)
+        test_edges, seed=cfg.test_seed, split_name="test",
+        cache_path=_eval_cache_path(cfg, "test"), **cache_kwargs)
 
     def eval_fn(mdl, split: str) -> dict:
         cache = val_cache if split == "val" else test_cache
@@ -362,14 +402,29 @@ Examples:
     parser.add_argument("--dropout", type=float, default=0.0,
                         help="Dropout rate after each hidden ReLU (default: 0 = off)")
 
+    # Node features
+    parser.add_argument("--use-node-features", action="store_true",
+                        help="Append 15-dim src + 15-dim dst node features to pair features")
+
+    # Scheduler
+    parser.add_argument("--scheduler", default="",
+                        choices=["", "cosine", "plateau"],
+                        help="LR scheduler: '' (none), 'cosine', 'plateau' (default: '')")
+    parser.add_argument("--scheduler-min-lr", type=float, default=1e-6,
+                        help="cosine: eta_min; plateau: min_lr (default: 1e-6)")
+    parser.add_argument("--scheduler-patience", type=int, default=3,
+                        help="plateau: eval checks without improvement before LR decay (default: 3)")
+    parser.add_argument("--scheduler-factor", type=float, default=0.5,
+                        help="plateau: LR multiplier on decay (default: 0.5)")
+
     # Training
     parser.add_argument("--lr",         type=float, default=1e-3)
     parser.add_argument("--epochs",     type=int,   default=50)
     parser.add_argument("--patience",   type=int,   default=10)
     parser.add_argument("--batch-size", type=int,   default=4096)
     parser.add_argument("--seed",       type=int,   default=42)
-    parser.add_argument("--eval-every",   type=int, default=2,
-                        help="Epochs between val evaluations (default: 2)")
+    parser.add_argument("--eval-every",   type=int, default=4,
+                        help="Epochs between val evaluations (default: 4)")
     parser.add_argument("--k-neg-sample", type=int, default=10,
                         help="Negatives per step subsampled from precomputed K "
                              "(0 = use all K; default: 10 to prevent neg overfitting)")
@@ -406,6 +461,11 @@ Examples:
         active_feature_indices=active_indices,
         hidden_dims=args.hidden,
         dropout=args.dropout,
+        use_node_features=args.use_node_features,
+        scheduler=args.scheduler,
+        scheduler_min_lr=args.scheduler_min_lr,
+        scheduler_patience=args.scheduler_patience,
+        scheduler_factor=args.scheduler_factor,
         lr=args.lr,
         n_epochs=args.epochs,
         patience=args.patience,

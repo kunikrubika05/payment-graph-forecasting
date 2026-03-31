@@ -14,18 +14,18 @@ comparison with the CN baseline. Specifically:
   5. Negative sampling per query: n_negatives=100 (50 hist + 50 rand)
      using sample_negatives_for_eval from sg_baselines/sampling.py.
      seed matches sg_baselines: val → random_seed+10, test → random_seed+20.
-  6. Scoring: MLP forward on (src, cand) features computed on-the-fly via
-     compute_features_batch.
+  6. Feature computation: pair features via compute_features_batch; optionally
+     node features (15-dim src + 15-dim dst) appended if node_features provided.
   7. Ranking: rank = count(score > true_score) + 1  (conservative, ties to lower rank).
   8. Metrics: MRR, Hits@1, Hits@3, Hits@10 via compute_ranking_metrics.
 
-Correctness checks verified in this module:
-  - all_positives_per_src built BEFORE subsampling (line ~137).
-  - eval_features computed from TRAIN adjacency only (adj passed from caller).
-  - No future information: adj + node_mapping come from train only (asserted
-    by precompute.py; here we receive them as arguments and trust the caller).
+Disk caching (optional):
+  Pass cache_path to build_eval_cache. On first call the result is saved to
+  disk (numpy .npz). Subsequent calls load instantly. Different feature
+  configurations use different cache paths — caller is responsible for naming.
 """
 
+import os
 import time
 from typing import Dict, List, Optional
 
@@ -38,6 +38,8 @@ from sg_baselines.sampling import sample_negatives_for_eval
 from src.baselines.evaluation import compute_ranking_metrics
 from src.models.pairwise_mlp.features import compute_features_batch
 from src.models.pairwise_mlp.model import PairMLP
+
+N_NODE_FEATURES = 15
 
 
 def build_eval_cache(
@@ -54,6 +56,8 @@ def build_eval_cache(
     max_queries: int = 50_000,
     feature_batch: int = 50_000,
     active_feature_indices: Optional[List[int]] = None,
+    node_features: Optional[np.ndarray] = None,
+    cache_path: Optional[str] = None,
     split_name: str = "",
 ) -> Dict:
     """Pre-compute candidate features for a fixed seed (call once before training).
@@ -64,6 +68,25 @@ def build_eval_cache(
     Subsequent evaluate_split calls with the returned cache only run the
     fast GPU forward pass and ranking.
 
+    Args:
+        eval_edges:             DataFrame of val or test edges.
+        train_neighbors:        Dict mapping src → set of train dst (for hist negatives).
+        node_mapping:           Sorted local→global node index array from train.
+        adj_undir, adj_dir:     Scipy CSR adjacency (local indices, train-only).
+        deg_undir:              Precomputed undirected degrees (local).
+        w_undir, w_dir:         Precomputed Adamic-Adar weights (local).
+        seed:                   RNG seed (val_seed or test_seed from config).
+        n_negatives:            Negatives per query (default 100).
+        max_queries:            Cap on total queries (default 50,000).
+        feature_batch:          Pairs per scipy batch for feature computation.
+        active_feature_indices: Pair feature columns to keep. None = all 7.
+        node_features:          Optional float32 array (n_nodes_local, 15).
+                                When provided, 15-dim src + 15-dim dst node
+                                features are concatenated after pair features.
+        cache_path:             Optional path to save/load .npz cache on disk.
+                                Enables sharing the cache across parallel runs.
+        split_name:             Tag for log messages ("val" / "test").
+
     Returns:
         dict with keys:
           all_features:   float32 array (N_pairs, n_active_features)
@@ -71,8 +94,24 @@ def build_eval_cache(
           n_queries:      int
     """
     tag = f"[{split_name}] " if split_name else ""
+
+    # ------------------------------------------------------------------
+    # Disk cache: load if available
+    # ------------------------------------------------------------------
+    if cache_path and os.path.exists(cache_path):
+        print(f"  {tag}Loading eval cache from disk...", flush=True)
+        data = np.load(cache_path)
+        return {
+            "all_features":  data["all_features"],
+            "query_offsets": data["query_offsets"].tolist(),
+            "n_queries":     int(data["n_queries"]),
+        }
+
     print(f"  {tag}Building eval cache (one-time cost)...", flush=True)
 
+    # ------------------------------------------------------------------
+    # Steps 1-3: deduplicate, filter unseen nodes, build all_positives_per_src
+    # ------------------------------------------------------------------
     src_all = eval_edges["src_idx"].values.astype(np.int64)
     dst_all = eval_edges["dst_idx"].values.astype(np.int64)
     unique_df = pd.DataFrame({"src": src_all, "dst": dst_all}).drop_duplicates()
@@ -93,6 +132,9 @@ def build_eval_cache(
     for s, d in zip(src_u, dst_u):
         all_positives_per_src.setdefault(int(s), set()).add(int(d))
 
+    # ------------------------------------------------------------------
+    # Step 4: subsample
+    # ------------------------------------------------------------------
     n_total = len(src_u)
     if n_total > max_queries:
         rng_sub = np.random.RandomState(seed + 777)
@@ -104,6 +146,9 @@ def build_eval_cache(
 
     n_queries = len(src_u)
 
+    # ------------------------------------------------------------------
+    # Step 5: negative sampling
+    # ------------------------------------------------------------------
     print(f"  {tag}Sampling negatives...", flush=True)
     rng = np.random.RandomState(seed)
     t0 = time.time()
@@ -126,11 +171,14 @@ def build_eval_cache(
         all_cand_list.extend(candidates.tolist())
         query_offsets.append(query_offsets[-1] + n_cand)
 
-    all_src = np.array(all_src_list, dtype=np.int64)
+    all_src  = np.array(all_src_list,  dtype=np.int64)
     all_cand = np.array(all_cand_list, dtype=np.int64)
     print(f"  {tag}Neg sampling done, {len(all_src):,} pairs ({time.time()-t0:.1f}s)",
           flush=True)
 
+    # ------------------------------------------------------------------
+    # Step 6: compute features
+    # ------------------------------------------------------------------
     t0 = time.time()
     all_features = compute_features_batch(
         all_src, all_cand,
@@ -140,13 +188,39 @@ def build_eval_cache(
     )
     if active_feature_indices:
         all_features = all_features[:, active_feature_indices]
+
+    # Append node features: [pair_feat | node_src | node_cand]
+    if node_features is not None:
+        all_src_local  = np.searchsorted(node_mapping, all_src)
+        all_cand_local = np.searchsorted(node_mapping, all_cand)
+        node_src_feat  = node_features[all_src_local]   # (N, 15) — all src in mapping
+        node_cand_feat = node_features[all_cand_local]  # (N, 15) — all cand in mapping
+        all_features   = np.concatenate(
+            [all_features, node_src_feat, node_cand_feat], axis=1
+        )
+
     print(f"  {tag}Features computed ({time.time()-t0:.1f}s)", flush=True)
 
-    return {
+    result = {
         "all_features":  all_features,
         "query_offsets": query_offsets,
         "n_queries":     n_queries,
     }
+
+    # ------------------------------------------------------------------
+    # Save to disk cache
+    # ------------------------------------------------------------------
+    if cache_path:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        np.savez_compressed(
+            cache_path,
+            all_features=all_features,
+            query_offsets=np.array(query_offsets, dtype=np.int64),
+            n_queries=np.array(n_queries),
+        )
+        print(f"  {tag}Cache saved → {cache_path}", flush=True)
+
+    return result
 
 
 def evaluate_split(

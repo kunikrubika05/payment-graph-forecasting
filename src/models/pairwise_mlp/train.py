@@ -22,7 +22,7 @@ Training protocol:
 
 import os
 import time
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -32,6 +32,51 @@ from torch.utils.data import DataLoader
 from src.models.pairwise_mlp.config import PairMLPConfig, VALID_LOSSES
 from src.models.pairwise_mlp.dataset import PairwiseDataset
 from src.models.pairwise_mlp.model import PairMLP
+
+
+# ---------------------------------------------------------------------------
+# LR Scheduler factory
+# ---------------------------------------------------------------------------
+
+def make_scheduler(
+    optimizer: torch.optim.Optimizer,
+    cfg: PairMLPConfig,
+) -> Optional[object]:
+    """Create an LR scheduler from config. Returns None if cfg.scheduler is empty.
+
+    Supported schedulers:
+      "cosine"  — CosineAnnealingLR: smoothly decays lr → scheduler_min_lr
+                  over n_epochs. Call scheduler.step() once per epoch.
+      "plateau" — ReduceLROnPlateau: multiplies lr by scheduler_factor when
+                  val MRR has not improved for scheduler_patience eval checks.
+                  Call scheduler.step(val_mrr) after each evaluation.
+
+    Args:
+        optimizer: The Adam optimizer created in train().
+        cfg:       PairMLPConfig with scheduler_* fields.
+
+    Returns:
+        A PyTorch scheduler or None.
+    """
+    if not cfg.scheduler:
+        return None
+    if cfg.scheduler == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=cfg.n_epochs,
+            eta_min=cfg.scheduler_min_lr,
+        )
+    if cfg.scheduler == "plateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            patience=cfg.scheduler_patience,
+            factor=cfg.scheduler_factor,
+            min_lr=cfg.scheduler_min_lr,
+        )
+    raise ValueError(
+        f"Unknown scheduler '{cfg.scheduler}'. Valid: '', 'cosine', 'plateau'"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +219,7 @@ def train(
     optimizer = torch.optim.Adam(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
     )
+    scheduler = make_scheduler(optimizer, cfg)
 
     history: Dict = {
         "train_loss":     [],
@@ -185,13 +231,15 @@ def train(
     t_train_start   = time.time()
 
     print(f"\nTraining PairMLP ({cfg.loss.upper()} loss) for up to {cfg.n_epochs} epochs")
-    print(f"  Features ({cfg.n_input_features}): {cfg.selected_feature_names}")
-    K_total  = dataset.neg.shape[1]
+    print(f"  Features ({cfg.n_input_features}): {cfg.selected_feature_names}"
+          + (" + node_features(30)" if cfg.use_node_features else ""))
+    K_total  = dataset.neg_k
     K_active = cfg.k_neg_sample if cfg.k_neg_sample > 0 else K_total
     print(f"  Dataset: {len(dataset):,} positive edges, K={K_total} neg"
           + (f" (sampling {K_active}/epoch)" if K_active < K_total else ""))
     print(f"  Batches/epoch: {len(loader):,}, batch_size={cfg.batch_size}")
-    print(f"  patience={cfg.patience} (eval every {eval_every} epochs)")
+    sched_str = f", scheduler={cfg.scheduler}" if cfg.scheduler else ""
+    print(f"  patience={cfg.patience} (eval every {eval_every} epochs){sched_str}")
 
     for epoch in range(1, cfg.n_epochs + 1):
         t0   = time.time()
@@ -202,17 +250,25 @@ def train(
         history["train_loss"].append(loss)
         ep_time = time.time() - t0
 
+        if scheduler is not None and cfg.scheduler == "cosine":
+            scheduler.step()
+
         if epoch % eval_every == 0 or epoch == cfg.n_epochs:
             val_metrics = eval_fn(model, "val")
             val_mrr     = val_metrics["mrr"]
             history["val_mrr"].append(val_mrr)
             history["val_mrr_epoch"].append(epoch)
 
+            if scheduler is not None and cfg.scheduler == "plateau":
+                scheduler.step(val_mrr)
+
             improved = val_mrr > best_val_mrr
             marker   = " ← best" if improved else ""
+            cur_lr   = optimizer.param_groups[0]["lr"]
+            lr_str   = f" | lr={cur_lr:.2e}" if cfg.scheduler else ""
             print(
                 f"  Epoch {epoch:3d}/{cfg.n_epochs} | loss={loss:.4f} | "
-                f"val_MRR={val_mrr:.4f}{marker} | {ep_time:.1f}s",
+                f"val_MRR={val_mrr:.4f}{marker}{lr_str} | {ep_time:.1f}s",
                 flush=True,
             )
 
