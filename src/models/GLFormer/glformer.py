@@ -58,6 +58,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _sanitize_edge_features(edge_feats: torch.Tensor) -> torch.Tensor:
+    """Compress raw edge features to a numerically stable range.
+
+    Transactional features such as USD volume may span several orders of
+    magnitude. GLFormer consumes them directly in the token projection, so we
+    log-compress and sanitize them before concatenating with time encodings.
+    """
+
+    edge_feats = torch.nan_to_num(edge_feats, nan=0.0, posinf=0.0, neginf=0.0)
+    return torch.sign(edge_feats) * torch.log1p(edge_feats.abs())
+
+
 class GLFormerTimeEncoding(nn.Module):
     """Fixed cosine time encoding with log-spaced frequencies.
 
@@ -381,6 +393,7 @@ class GLFormerEncoder(nn.Module):
         time_enc = self.time_encoder(delta_times)       # [B, K, time_dim]
 
         if self.edge_feat_dim > 0 and edge_feats is not None:
+            edge_feats = _sanitize_edge_features(edge_feats)
             inp = torch.cat([time_enc, edge_feats], dim=-1)
         else:
             inp = time_enc

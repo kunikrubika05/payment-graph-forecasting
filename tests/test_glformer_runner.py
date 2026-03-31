@@ -2,10 +2,13 @@
 
 from argparse import Namespace
 
+import torch
+
 from payment_graph_forecasting.experiments.runners.glformer import (
     build_glformer_arg_parser,
     run_glformer_experiment,
 )
+from src.models.GLFormer.glformer import GLFormerTime
 
 
 def test_glformer_arg_parser_supports_dry_run():
@@ -66,3 +69,29 @@ def test_glformer_runner_dry_run_returns_payload(tmp_path):
     assert result["parquet_remote_path"] is None
     assert result["sampling_backend"] == "cpp"
     assert result["use_cooccurrence"] is True
+
+
+def test_glformer_forward_stays_finite_with_large_edge_features():
+    model = GLFormerTime(
+        hidden_dim=16,
+        num_neighbors=4,
+        num_glformer_layers=1,
+        channel_expansion=2.0,
+        dropout=0.0,
+        edge_feat_dim=2,
+        node_feat_dim=0,
+        use_cooccurrence=False,
+    )
+    logits = model(
+        src_delta_times=torch.tensor([[0.0, 1.0, 2.0, 0.0]]),
+        src_lengths=torch.tensor([3]),
+        dst_delta_times=torch.tensor([[0.0, 2.0, 3.0, 0.0]]),
+        dst_lengths=torch.tensor([3]),
+        src_edge_feats=torch.tensor(
+            [[[1e-2, 8.0e6], [1.0, 1.0e5], [5.0, 2.0e3], [float("nan"), float("inf")]]]
+        ),
+        dst_edge_feats=torch.tensor(
+            [[[3e-2, 7.5e6], [2.0, 2.0e5], [7.0, 9.0e3], [float("-inf"), 0.0]]]
+        ),
+    )
+    assert torch.isfinite(logits).all()
