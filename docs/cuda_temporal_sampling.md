@@ -175,3 +175,70 @@ C++ и Python оба упираются в одну и ту же память. C
 
 При K=20 sampling — не узкое место, CUDA бонус.
 При K=512 CUDA превращает sampling из bottleneck в незначимые 0.34ms.
+
+---
+
+## Что именно изменилось в DyGFormer pipeline
+
+В рамках package integration мы оптимизировали не сам Transformer внутри
+DyGFormer, а path подготовки батча перед forward/backward:
+
+1. Убрали неправильную работу с разреженными `src_idx/dst_idx` в ORBITAAL.
+   До фикса граф мог раздуваться до сотен миллионов узлов из-за использования
+   глобальных id как будто они плотные. Теперь stream-graph данные сначала
+   переводятся в dense-remap пространство.
+
+2. Перенесли DyGFormer training path на `TemporalGraphSampler` с backend
+   `cuda`.
+
+3. Убрали основной CPU bottleneck: раньше batch prep делал несколько CPU
+   sampling passes, NumPy materialization и множество CPU->GPU transfer.
+   Теперь temporal sampling и featurization выполняются на GPU.
+
+4. Вынесли CUDA-backed train loop в отдельный файл:
+   [src/models/DyGFormer/dygformer_cuda_train.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/src/models/DyGFormer/dygformer_cuda_train.py)
+
+5. Подключили это через framework API:
+   - [payment_graph_forecasting/models/dygformer.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/payment_graph_forecasting/models/dygformer.py)
+   - [payment_graph_forecasting/training/api.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/payment_graph_forecasting/training/api.py)
+   - [payment_graph_forecasting/experiments/runners/dygformer.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/payment_graph_forecasting/experiments/runners/dygformer.py)
+
+### Как это включается
+
+Это действительно функциональность фреймворка, а не ручной special-case.
+Backend выбирается флагом в конфиге:
+
+```yaml
+sampling:
+  backend: cuda
+```
+
+Если backend не `auto`, package-facing API маршрутизирует запуск в
+`train_dygformer_cuda(...)`.
+
+### Что ускорилось на практике
+
+На реальном DyGFormer training pipeline для ORBITAAL 10% на V100:
+
+| Конфиг | До | После | Комментарий |
+|--------|----|-------|-------------|
+| `1536 / 32` | `~47.9 мин/epoch` | `~27.1 мин/epoch` | основной apples-to-apples замер |
+| `3072 / 32` | н/д | `~26.6 мин/epoch` | лучший safe config |
+| `3072 / 24` | н/д | `~19.7 мин/epoch` | speed-first config |
+
+На шаге подготовки батча эффект был ещё сильнее:
+
+- `prepare_dygformer_batch` в apples-to-apples сравнении упал примерно с
+  `0.225s` до `0.0028s` на шаг
+- это почти полностью убрало CPU-side bottleneck sampling/preprocessing
+
+### Что осталось bottleneck'ом
+
+После переноса sampling на CUDA узкое место уже не в batch-prep, а в:
+
+- forward/backward самого DyGFormer
+- materialization negative branches
+- общей стоимости большого `num_neighbors`
+
+Именно поэтому после ускорения оптимальный batch size сместился вверх:
+V100 уже можно грузить батчами порядка `2048-3072`, а не `1536`.

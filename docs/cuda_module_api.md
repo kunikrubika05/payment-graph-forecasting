@@ -26,6 +26,23 @@ Verified on: Python 3.12, PyTorch 2.5.1+cu121, CUDA 12.8, V100 / A10.
 `src/models/build_ext.py` still works as a compatibility shim, but the
 package-facing build CLI above is the canonical entrypoint.
 
+For package-facing experiments, the CUDA backend is enabled by config, not by
+importing a separate runner. The stable public surface is:
+
+```yaml
+experiment:
+  model: dygformer
+
+sampling:
+  backend: cuda
+```
+
+and launched through:
+
+```bash
+python -m payment_graph_forecasting.experiments.launcher --config spec.yaml
+```
+
 ---
 
 ## Primitive 1: Temporal Neighbor Sampling
@@ -103,6 +120,50 @@ batch, achieving near-linear scaling with batch size and K.
 
 **When to use CUDA:** K ≥ 100 or batch_size ≥ 1024. For K=20 (GraphMixer),
 C++ is already fast enough — CUDA provides a modest additional gain.
+
+### DyGFormer integration in the framework
+
+DyGFormer now uses the same package-facing API as the other integrated models.
+
+Relevant files:
+
+- [payment_graph_forecasting/models/dygformer.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/payment_graph_forecasting/models/dygformer.py)
+- [payment_graph_forecasting/training/api.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/payment_graph_forecasting/training/api.py)
+- [payment_graph_forecasting/experiments/runners/dygformer.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/payment_graph_forecasting/experiments/runners/dygformer.py)
+- [src/models/DyGFormer/dygformer_cuda_train.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/src/models/DyGFormer/dygformer_cuda_train.py)
+
+Dispatch rule:
+
+- `sampling.backend: auto` -> legacy CPU/C++-compatible path
+- `sampling.backend: cuda` -> `train_dygformer_cuda(...)`
+
+The model itself remains standard PyTorch DyGFormer. The optimisation is in
+the training pipeline around temporal sampling and batch preparation.
+
+### Real V100 results for the integrated DyGFormer path
+
+Measured on ORBITAAL stream-graph, summer 2020, 10% sample:
+
+| Config | Epoch estimate |
+|---|---|
+| old package path, `batch_size=1536`, `num_neighbors=32` | `~47.9 min` |
+| CUDA path, `batch_size=1536`, `num_neighbors=32` | `~27.1 min` |
+| CUDA path, `batch_size=3072`, `num_neighbors=32` | `~26.6 min` |
+| CUDA path, `batch_size=3072`, `num_neighbors=24` | `~19.7 min` |
+
+Recommended default for full training:
+
+```yaml
+sampling:
+  backend: cuda
+  num_neighbors: 32
+
+training:
+  batch_size: 3072
+```
+
+`num_neighbors: 24` is the speed-oriented alternative. It is faster, but it is
+not the safest default for quality-sensitive long runs.
 
 ---
 

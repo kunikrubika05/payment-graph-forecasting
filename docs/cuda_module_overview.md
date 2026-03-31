@@ -133,9 +133,51 @@ dense_large            cuda         1.66       1.71     21.5x  ←
 |--------|---------|--------|-----------|
 | GraphMixer / GLFormer обучение | `sample_neighbors` + `featurize` | cpp / cuda | sampling < 2% эпохи |
 | DyGFormer обучение (K=512) | `sample_neighbors` + `featurize` | **cuda** | 0.34ms вместо 62ms |
+| DyGFormer package-facing train pipeline | `train_dygformer_cuda` + `TemporalGraphSampler` | **cuda** | эпоха на V100: `47.9 -> 27.1` мин при `1536/32` |
+| DyGFormer speed-oriented config | `train_dygformer_cuda` + `TemporalGraphSampler` | **cuda** | оценка `~19.7` мин/эпоха при `3072/24` |
 | PairwiseMLP precompute | `CommonNeighbors.compute` | cpp (sparse) | точный CN, 43M пар |
 | BUDDY-like модель (dense) | `CommonNeighbors.compute` | **cuda** | точный CN вместо MinHash |
 | Evaluation neg sampling | `sample_negatives` | cpp / cuda | < 1ms на батч |
+
+### DyGFormer в package-facing API
+
+Начиная с текущей интеграции, CUDA backend для DyGFormer включается не
+через отдельный legacy launcher, а через конфиг фреймворка:
+
+```yaml
+experiment:
+  model: dygformer
+
+sampling:
+  backend: cuda
+  num_neighbors: 32
+```
+
+Дальше canonical entrypoint обычный:
+
+```bash
+python -m payment_graph_forecasting.experiments.launcher --config /path/to/spec.yaml
+```
+
+Внутри это работает так:
+
+- [payment_graph_forecasting/models/dygformer.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/payment_graph_forecasting/models/dygformer.py) прокидывает `sampling.backend` в runner
+- [payment_graph_forecasting/training/api.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/payment_graph_forecasting/training/api.py) выбирает `train_dygformer_cuda(...)`, если backend не `auto`
+- [src/models/DyGFormer/dygformer_cuda_train.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/src/models/DyGFormer/dygformer_cuda_train.py) выполняет CUDA-backed train loop
+
+### Реальный эффект на ORBITAAL 10%
+
+Изменение не ограничилось synthetic benchmark'ами. На реальном package-facing
+DyGFormer pipeline для ORBITAAL stream-graph (summer 2020, 10%) были получены:
+
+| Конфиг | До | После | Ускорение |
+|--------|----|-------|-----------|
+| `batch_size=1536`, `num_neighbors=32` | `~47.9 мин/epoch` | `~27.1 мин/epoch` | `~1.8x` |
+| `batch_size=3072`, `num_neighbors=32` | н/д | `~26.6 мин/epoch` | лучший safe config |
+| `batch_size=3072`, `num_neighbors=24` | н/д | `~19.7 мин/epoch` | speed-oriented config |
+
+Ключевой вывод: после интеграции CUDA sampling bottleneck batch-prep почти
+исчезает, и эпоха начинает упираться уже в сам forward/backward DyGFormer.
 
 ---
 
