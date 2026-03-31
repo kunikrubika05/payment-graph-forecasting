@@ -41,9 +41,9 @@ logger = logging.getLogger(__name__)
 
 
 def _amp_autocast(enabled: bool, device_type: str):
-    """Return AMP autocast context or a no-op context manager."""
+    """Return AMP autocast context (BF16) or a no-op context manager."""
     if enabled and device_type == "cuda":
-        return torch.amp.autocast("cuda")
+        return torch.amp.autocast("cuda", dtype=torch.bfloat16)
     return contextlib.nullcontext()
 
 
@@ -79,30 +79,20 @@ def compute_neighbor_cooccurrence(
     src_cooc = np.zeros((B, K, 2), dtype=np.float32)
     dst_cooc = np.zeros((B, K, 2), dtype=np.float32)
 
-    for b in range(B):
-        sl = int(src_lens[b])
-        dl = int(dst_lens[b])
-        if sl == 0 and dl == 0:
-            continue
+    src_mask = np.arange(K)[None, :] < src_lens[:, None]  # [B, K]
+    dst_mask = np.arange(K)[None, :] < dst_lens[:, None]  # [B, K]
 
-        src_seq = src_nids[b, :sl]
-        dst_seq = dst_nids[b, :dl]
+    match = (src_nids[:, :, None] == src_nids[:, None, :]) & src_mask[:, None, :]
+    src_cooc[:, :, 0] = match.sum(axis=2) * src_mask
 
-        src_unique, src_counts_in_src = np.unique(src_seq, return_counts=True)
-        dst_unique, dst_counts_in_dst = np.unique(dst_seq, return_counts=True)
+    match = (src_nids[:, :, None] == dst_nids[:, None, :]) & dst_mask[:, None, :]
+    src_cooc[:, :, 1] = match.sum(axis=2) * src_mask
 
-        src_count_map = dict(zip(src_unique.tolist(), src_counts_in_src.tolist()))
-        dst_count_map = dict(zip(dst_unique.tolist(), dst_counts_in_dst.tolist()))
+    match = (dst_nids[:, :, None] == dst_nids[:, None, :]) & dst_mask[:, None, :]
+    dst_cooc[:, :, 0] = match.sum(axis=2) * dst_mask
 
-        for j in range(sl):
-            nid = int(src_seq[j])
-            src_cooc[b, j, 0] = src_count_map.get(nid, 0)
-            src_cooc[b, j, 1] = dst_count_map.get(nid, 0)
-
-        for j in range(dl):
-            nid = int(dst_seq[j])
-            dst_cooc[b, j, 0] = dst_count_map.get(nid, 0)
-            dst_cooc[b, j, 1] = src_count_map.get(nid, 0)
+    match = (dst_nids[:, :, None] == src_nids[:, None, :]) & src_mask[:, None, :]
+    dst_cooc[:, :, 1] = match.sum(axis=2) * dst_mask
 
     return src_cooc, dst_cooc
 
@@ -332,30 +322,39 @@ def train_epoch(
                 dst_node_feats=batch.get("pos_dst_node_feats"),
             )
 
-            neg_logits_list = []
-            for neg_i in range(neg_per_positive):
-                neg_ef_i = (
-                    batch["neg_dst_edge_feats"][:, neg_i, :, :]
-                    if use_edge_feats else None
-                )
-                neg_nf_i = (
-                    batch["neg_dst_node_feats"][:, neg_i, :, :]
-                    if use_node_feats else None
-                )
-                neg_logits_list.append(model(
-                    src_delta_times=batch["src_delta_times"],
-                    src_lengths=batch["src_lengths"],
-                    dst_delta_times=batch["neg_dst_delta_times"][:, neg_i, :],
-                    dst_lengths=batch["neg_dst_lengths"][:, neg_i],
-                    src_cooc_counts=batch["neg_src_cooc"][:, neg_i, :, :],
-                    dst_cooc_counts=batch["neg_dst_cooc"][:, neg_i, :, :],
-                    src_edge_feats=batch.get("src_edge_feats"),
-                    dst_edge_feats=neg_ef_i,
-                    src_node_feats=batch.get("src_node_feats"),
-                    dst_node_feats=neg_nf_i,
-                ))
+            N = neg_per_positive
+            K = model.num_neighbors
+            src_dt_rep = batch["src_delta_times"].repeat_interleave(N, dim=0)
+            src_len_rep = batch["src_lengths"].repeat_interleave(N)
+            neg_src_cooc = batch["neg_src_cooc"].reshape(B * N, K, 2)
+            neg_dst_cooc = batch["neg_dst_cooc"].reshape(B * N, K, 2)
+            neg_dst_dt = batch["neg_dst_delta_times"].reshape(B * N, K)
+            neg_dst_len = batch["neg_dst_lengths"].reshape(B * N)
 
-            all_logits = torch.cat([pos_logits] + neg_logits_list)
+            neg_src_ef = neg_dst_ef = neg_src_nf = neg_dst_nf = None
+            if use_edge_feats:
+                ef_dim = batch["src_edge_feats"].shape[-1]
+                neg_src_ef = batch["src_edge_feats"].repeat_interleave(N, dim=0)
+                neg_dst_ef = batch["neg_dst_edge_feats"].reshape(B * N, K, ef_dim)
+            if use_node_feats:
+                nf_dim = batch["src_node_feats"].shape[-1]
+                neg_src_nf = batch["src_node_feats"].repeat_interleave(N, dim=0)
+                neg_dst_nf = batch["neg_dst_node_feats"].reshape(B * N, K, nf_dim)
+
+            neg_logits = model(
+                src_delta_times=src_dt_rep,
+                src_lengths=src_len_rep,
+                dst_delta_times=neg_dst_dt,
+                dst_lengths=neg_dst_len,
+                src_cooc_counts=neg_src_cooc,
+                dst_cooc_counts=neg_dst_cooc,
+                src_edge_feats=neg_src_ef,
+                dst_edge_feats=neg_dst_ef,
+                src_node_feats=neg_src_nf,
+                dst_node_feats=neg_dst_nf,
+            )
+
+            all_logits = torch.cat([pos_logits, neg_logits])
             all_labels = torch.cat([
                 torch.ones(B, device=device),
                 torch.zeros(B * neg_per_positive, device=device),
@@ -629,6 +628,9 @@ def train_dygformer(
         output_dim=output_dim,
     ).to(device)
 
+    if device.type == "cuda":
+        model = torch.compile(model)
+
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(
         p.numel() for p in model.parameters() if p.requires_grad
@@ -642,7 +644,7 @@ def train_dygformer(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
     amp_enabled = use_amp and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
 
     train_indices = np.where(train_mask)[0]
     val_indices = np.where(val_mask)[0]

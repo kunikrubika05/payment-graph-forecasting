@@ -148,12 +148,13 @@ class DyGFormerTransformerLayer(nn.Module):
         assert d_model % n_heads == 0
         self.d_k = d_model // n_heads
 
+        self.dropout_p = dropout
+
         self.norm1 = nn.LayerNorm(d_model)
         self.W_Q = nn.Linear(d_model, d_model)
         self.W_K = nn.Linear(d_model, d_model)
         self.W_V = nn.Linear(d_model, d_model)
         self.W_O = nn.Linear(d_model, d_model)
-        self.attn_dropout = nn.Dropout(dropout)
 
         self.norm2 = nn.LayerNorm(d_model)
         d_ff = d_model * d_ff_factor
@@ -181,9 +182,9 @@ class DyGFormerTransformerLayer(nn.Module):
         K = self.W_K(h).view(B, S, self.n_heads, self.d_k).transpose(1, 2)
         V = self.W_V(h).view(B, S, self.n_heads, self.d_k).transpose(1, 2)
 
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
-        attn = self.attn_dropout(F.softmax(scores, dim=-1))
-        context = torch.matmul(attn, V)
+        context = F.scaled_dot_product_attention(
+            Q, K, V, dropout_p=self.dropout_p if self.training else 0.0
+        )
 
         context = context.transpose(1, 2).contiguous().view(B, S, self.d_model)
         attn_out = self.W_O(context)
