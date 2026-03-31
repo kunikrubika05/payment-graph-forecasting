@@ -121,7 +121,7 @@ def _resolve_edge_table(data: DataConfig, *, input_format: str) -> ResolvedStrea
     cache_dir = Path(data.cache_dir or DEFAULT_DATA_CACHE_DIR)
     cache_dir.mkdir(parents=True, exist_ok=True)
     parquet_path = data.parquet_path or str(cache_dir / f"{Path(raw_path).stem}_stream_graph.parquet")
-    extra = data.extra
+    extra = data.extra.get("extra", data.extra) if isinstance(data.extra.get("extra"), dict) else data.extra
     convert_edge_table_to_stream_graph(
         input_path=raw_path,
         output_parquet=parquet_path,

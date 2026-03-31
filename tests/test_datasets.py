@@ -96,6 +96,41 @@ def test_resolve_stream_graph_dataset_converts_generic_edge_table_csv(tmp_path):
     assert df["usd"].tolist() == [7.0, 7.0]
 
 
+def test_resolve_stream_graph_dataset_converts_generic_edge_table_csv_with_nested_extra(tmp_path):
+    raw_csv = tmp_path / "edges.csv"
+    raw_csv.write_text(
+        "\n".join(
+            [
+                "source,target,ts,amount",
+                "10,20,30,1.5",
+                "11,21,10,2.5",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    resolved = resolve_stream_graph_dataset(
+        DataConfig(
+            source="edge_table_csv",
+            raw_path=str(raw_csv),
+            cache_dir=str(tmp_path / "cache"),
+            extra={
+                "extra": {
+                    "src_col": "source",
+                    "dst_col": "target",
+                    "timestamp_col": "ts",
+                    "btc_col": "amount",
+                    "default_usd": 0.0,
+                    "remap_nodes": True,
+                }
+            },
+        )
+    )
+
+    df = pd.read_parquet(resolved.parquet_path)
+    assert df["timestamp"].tolist() == [10, 30]
+
+
 def test_convert_edge_table_to_stream_graph_supports_parquet_input(tmp_path):
     input_path = tmp_path / "edges.parquet"
     pd.DataFrame(
