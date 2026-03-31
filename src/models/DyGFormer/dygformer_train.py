@@ -318,14 +318,6 @@ def train_epoch(
             use_node_feats=use_node_feats,
         )
 
-        # Gradient accumulation: each of (1 + neg_per_positive) forward passes
-        # calls backward() immediately, retaining only one set of activations
-        # at a time. Loss is scaled by 1/(1+neg_per_positive) so accumulated
-        # gradients equal those from a single joint backward pass.
-        loss_scale = 1.0 / (1 + neg_per_positive)
-
-        optimizer.zero_grad()
-
         with _amp_autocast(amp_enabled, device.type):
             pos_logits = model(
                 src_delta_times=batch["src_delta_times"],
@@ -339,26 +331,18 @@ def train_epoch(
                 src_node_feats=batch.get("src_node_feats"),
                 dst_node_feats=batch.get("pos_dst_node_feats"),
             )
-            pos_loss = criterion(pos_logits, torch.ones(B, device=device)) * loss_scale
 
-        if amp_enabled and scaler is not None:
-            scaler.scale(pos_loss).backward()
-        else:
-            pos_loss.backward()
-
-        batch_loss = pos_loss.item()
-
-        for neg_i in range(neg_per_positive):
-            neg_ef_i = (
-                batch["neg_dst_edge_feats"][:, neg_i, :, :]
-                if use_edge_feats else None
-            )
-            neg_nf_i = (
-                batch["neg_dst_node_feats"][:, neg_i, :, :]
-                if use_node_feats else None
-            )
-            with _amp_autocast(amp_enabled, device.type):
-                neg_logit = model(
+            neg_logits_list = []
+            for neg_i in range(neg_per_positive):
+                neg_ef_i = (
+                    batch["neg_dst_edge_feats"][:, neg_i, :, :]
+                    if use_edge_feats else None
+                )
+                neg_nf_i = (
+                    batch["neg_dst_node_feats"][:, neg_i, :, :]
+                    if use_node_feats else None
+                )
+                neg_logits_list.append(model(
                     src_delta_times=batch["src_delta_times"],
                     src_lengths=batch["src_lengths"],
                     dst_delta_times=batch["neg_dst_delta_times"][:, neg_i, :],
@@ -369,26 +353,28 @@ def train_epoch(
                     dst_edge_feats=neg_ef_i,
                     src_node_feats=batch.get("src_node_feats"),
                     dst_node_feats=neg_nf_i,
-                )
-                neg_loss = criterion(neg_logit, torch.zeros(B, device=device)) * loss_scale
+                ))
 
-            if amp_enabled and scaler is not None:
-                scaler.scale(neg_loss).backward()
-            else:
-                neg_loss.backward()
+            all_logits = torch.cat([pos_logits] + neg_logits_list)
+            all_labels = torch.cat([
+                torch.ones(B, device=device),
+                torch.zeros(B * neg_per_positive, device=device),
+            ])
+            loss = criterion(all_logits, all_labels)
 
-            batch_loss += neg_loss.item()
-
+        optimizer.zero_grad()
         if amp_enabled and scaler is not None:
+            scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
         else:
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-        total_loss += batch_loss
+        total_loss += loss.item()
         num_batches += 1
         pbar.set_postfix(loss=f"{total_loss / num_batches:.8f}")
 
