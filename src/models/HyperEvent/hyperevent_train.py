@@ -329,6 +329,7 @@ def train_epoch(
     use_amp: bool = True,
     scaler: Optional[torch.cuda.amp.GradScaler] = None,
     rng: Optional[np.random.Generator] = None,
+    active_nodes: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """Run one training epoch in chronological edge order.
 
@@ -349,6 +350,10 @@ def train_epoch(
         use_amp: Enable mixed precision.
         scaler: GradScaler for AMP.
         rng: Random number generator.
+        active_nodes: Sorted int32 array of train node indices. Negative
+            destinations are sampled from this pool to avoid exposing the
+            model to nodes absent from training. If None, falls back to
+            sampling from the full node range [0, num_nodes).
 
     Returns:
         Dict with 'loss' (mean batch loss).
@@ -380,7 +385,11 @@ def train_epoch(
         src = data.src[batch_idx]
         dst = data.dst[batch_idx]
 
-        neg_dst = rng.integers(0, data.num_nodes, size=(B, neg_per_positive)).astype(np.int32)
+        if active_nodes is not None:
+            rand_idx = rng.integers(0, len(active_nodes), size=(B, neg_per_positive))
+            neg_dst = active_nodes[rand_idx].astype(np.int32)
+        else:
+            neg_dst = rng.integers(0, data.num_nodes, size=(B, neg_per_positive)).astype(np.int32)
 
         # Positive pairs
         pos_vecs, pos_masks = compute_batch_relational_vectors(adj, src, dst, n_latest)
@@ -499,11 +508,7 @@ def validate(
             scores = model(_t(vecs), _t(masks, torch.bool)).cpu().float().numpy()
 
         true_score = scores[0]
-        rank = (
-            1.0
-            + float((scores[1:] > true_score).sum())
-            + 0.5 * float((scores[1:] == true_score).sum())
-        )
+        rank = 1.0 + float((scores[1:] > true_score).sum())
         ranks.append(rank)
 
     ranks = np.array(ranks, dtype=np.float64)
@@ -623,6 +628,9 @@ def train_hyperevent(
 
     train_indices = np.where(train_mask)[0]  # already sorted chronologically
     val_indices = np.where(val_mask)[0]
+    active_nodes = np.unique(
+        np.concatenate([data.src[train_indices], data.dst[train_indices]])
+    ).astype(np.int32)
 
     config = {
         "model": "HyperEvent",
@@ -678,6 +686,7 @@ def train_hyperevent(
             use_amp=use_amp,
             scaler=scaler,
             rng=rng,
+            active_nodes=active_nodes,
         )
 
         # adj now contains full training history; rebuild for val (same state)

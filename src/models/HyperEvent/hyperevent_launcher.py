@@ -109,7 +109,7 @@ def run_experiment(args):
         args.parquet_path,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
-        undirected=True,
+        undirected=False,
         fraction=args.fraction,
     )
     data_time = time.time() - data_start
@@ -156,7 +156,32 @@ def run_experiment(args):
 
     _save_training_curves(output_dir, history)
 
-    logger.info("Step 3: TGB-style evaluation on test set...")
+    logger.info("Step 3a: TGB-style evaluation on val set (seed=42+300)...")
+    val_eval_start = time.time()
+    val_metrics_final = evaluate_tgb_style(
+        model=model,
+        data=data,
+        eval_mask=val_mask,
+        history_mask=train_mask,
+        device=device,
+        n_neighbor=args.n_neighbor,
+        n_latest=args.n_latest,
+        n_hist_neg=50,
+        n_random_neg=50,
+        use_amp=not args.no_amp,
+        seed=42 + 300,
+        active_nodes=active_nodes,
+        all_positives_per_src=all_positives_per_src,
+        max_eval_edges=args.max_test_edges if args.max_test_edges > 0 else None,
+    )
+    val_eval_time = time.time() - val_eval_start
+    logger.info(
+        "Val (TGB): MRR=%.4f Hits@1=%.3f Hits@3=%.3f Hits@10=%.3f",
+        val_metrics_final["mrr"], val_metrics_final["hits@1"],
+        val_metrics_final["hits@3"], val_metrics_final["hits@10"],
+    )
+
+    logger.info("Step 3b: TGB-style evaluation on test set (seed=42+400)...")
     eval_start = time.time()
     history_mask = train_mask | val_mask
 
@@ -183,11 +208,8 @@ def run_experiment(args):
         "experiment": exp_name,
         "parquet_path": args.parquet_path,
         "model": "HyperEvent",
+        "val_metrics_final": val_metrics_final,
         "test_metrics": test_metrics,
-        "best_val_mrr": (
-            float(history["val_mrr"][np.argmax(history["val_mrr"])])
-            if history["val_mrr"] else None
-        ),
         "best_epoch": (
             int(np.argmax(history["val_mrr"]) + 1)
             if history["val_mrr"] else None
@@ -196,7 +218,8 @@ def run_experiment(args):
         "timing": {
             "data_prep_sec": data_time,
             "training_sec": train_time,
-            "evaluation_sec": eval_time,
+            "val_eval_sec": val_eval_time,
+            "test_eval_sec": eval_time,
             "total_sec": total_time,
         },
         "device": str(device),
@@ -210,6 +233,10 @@ def run_experiment(args):
 
     logger.info("=" * 60)
     logger.info("RESULTS: %s", exp_name)
+    logger.info("  Val  MRR:     %.4f", val_metrics_final["mrr"])
+    logger.info("  Val  Hits@1:  %.4f", val_metrics_final["hits@1"])
+    logger.info("  Val  Hits@3:  %.4f", val_metrics_final["hits@3"])
+    logger.info("  Val  Hits@10: %.4f", val_metrics_final["hits@10"])
     logger.info("  Test MRR:     %.4f", test_metrics["mrr"])
     logger.info("  Test Hits@1:  %.4f", test_metrics["hits@1"])
     logger.info("  Test Hits@3:  %.4f", test_metrics["hits@3"])
@@ -218,13 +245,9 @@ def run_experiment(args):
         "  Test queries: %d scored, %d filtered (new nodes)",
         test_metrics.get("n_queries", 0), test_metrics.get("n_filtered", 0),
     )
-    logger.info(
-        "  Best val MRR: %.4f (epoch %d)",
-        final_results["best_val_mrr"],
-        final_results["best_epoch"],
-    )
+    logger.info("  Best epoch (fast val): %d", final_results["best_epoch"])
     logger.info("  Training:     %.1f min", train_time / 60)
-    logger.info("  Evaluation:   %.1f min", eval_time / 60)
+    logger.info("  Evaluation:   %.1f min", (val_eval_time + eval_time) / 60)
     logger.info("  Total time:   %.1f min", total_time / 60)
     logger.info("=" * 60)
 
