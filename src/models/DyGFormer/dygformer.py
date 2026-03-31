@@ -86,7 +86,14 @@ class DyGFormerTimeEncoding(nn.Module):
         Returns:
             Tensor of shape [..., dim].
         """
-        t_proj = self.w(t.unsqueeze(-1))
+        # Large temporal deltas can overflow under CUDA autocast fp16 before the
+        # cosine is applied, which then turns the whole batch into NaNs.
+        if t.is_cuda:
+            with torch.autocast(device_type="cuda", enabled=False):
+                t_proj = self.w(t.float().unsqueeze(-1))
+                return torch.cos(t_proj) * self.scale
+
+        t_proj = self.w(t.float().unsqueeze(-1))
         return torch.cos(t_proj) * self.scale
 
 

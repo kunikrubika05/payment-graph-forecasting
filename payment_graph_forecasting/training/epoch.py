@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import sys
 
 import numpy as np
 import torch
@@ -79,6 +80,7 @@ def run_loss_epoch(
         desc=progress_desc,
         leave=False,
         unit="batch",
+        disable=not sys.stderr.isatty(),
     )
     for start in pbar:
         end = min(start + batch_size, len(shuffled))

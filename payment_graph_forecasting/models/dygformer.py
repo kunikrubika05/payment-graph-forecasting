@@ -41,6 +41,7 @@ class DyGFormerAdapter(BaseRunnerAdapter):
             "cooc_dim": int(spec.model.get("cooc_dim", 50)),
             "output_dim": int(spec.model.get("output_dim", 172)),
             "num_neighbors": spec.sampling.num_neighbors,
+            "dropout": spec.training.dropout if spec.training.dropout is not None else 0.1,
             "neg_per_positive": int(spec.model.get("neg_per_positive", max(1, sampling.total_negatives // 20 or 5))),
             "n_hist_neg": sampling.n_hist_neg,
             "n_random_neg": sampling.n_random_neg,

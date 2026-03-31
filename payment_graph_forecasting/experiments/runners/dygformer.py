@@ -95,8 +95,16 @@ def _build_data_summary(data, train_mask, val_mask, test_mask):
     }
 
 
-def _build_eval_infrastructure(parquet_path: str, train_ratio: float, val_ratio: float) -> dict[str, object]:
-    df = pd.read_parquet(parquet_path)
+def _build_eval_infrastructure(
+    parquet_path: str,
+    train_ratio: float,
+    val_ratio: float,
+    *,
+    fraction: float | None = None,
+) -> dict[str, object]:
+    df = pd.read_parquet(parquet_path, columns=["src_idx", "dst_idx", "timestamp"])
+    if fraction is not None and 0.0 < fraction < 1.0:
+        df = df.iloc[: int(len(df) * fraction)]
     n_total = len(df)
     train_end = int(n_total * train_ratio)
     val_end = int(n_total * (train_ratio + val_ratio))
@@ -202,7 +210,12 @@ def run_dygformer_experiment(args: argparse.Namespace):
         fraction=args.fraction,
         features_path=features_path,
     )
-    eval_infra = _build_eval_infrastructure(parquet_path, args.train_ratio, args.val_ratio)
+    eval_infra = _build_eval_infrastructure(
+        parquet_path,
+        args.train_ratio,
+        args.val_ratio,
+        fraction=args.fraction,
+    )
     data_time = time.time() - data_start
     save_json(os.path.join(output_dir, "data_summary.json"), _build_data_summary(data, train_mask, val_mask, test_mask))
 
@@ -228,7 +241,7 @@ def run_dygformer_experiment(args: argparse.Namespace):
         num_attention_heads=args.num_attention_heads,
         cooc_dim=args.cooc_dim,
         output_dim=args.output_dim,
-        dropout=args.dropout,
+        dropout=getattr(args, "dropout", 0.1),
         patience=args.patience,
         seed=args.seed,
         max_val_edges=args.max_val_edges,

@@ -2,13 +2,14 @@
 
 from argparse import Namespace
 
+import pytest
 import torch
 
 from payment_graph_forecasting.experiments.runners.dygformer import (
     build_dygformer_arg_parser,
     run_dygformer_experiment,
 )
-from src.models.DyGFormer.dygformer import DyGFormerTime
+from src.models.DyGFormer.dygformer import DyGFormerTime, DyGFormerTimeEncoding
 
 
 def test_dygformer_arg_parser_supports_dry_run():
@@ -99,3 +100,14 @@ def test_dygformer_forward_stays_finite():
         dst_edge_feats=torch.tensor([[[0.5, 1.5], [1.5, 0.5], [0.1, 0.2], [0.0, 0.0]]]),
     )
     assert torch.isfinite(logits).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for AMP regression check")
+def test_dygformer_time_encoding_stays_finite_under_cuda_autocast():
+    encoder = DyGFormerTimeEncoding(100).cuda().eval()
+    delta_times = torch.tensor([[0.0, 60.0, 3600.0, 86400.0, 1e6, 1e7]], device="cuda")
+
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        encoded = encoder(delta_times)
+
+    assert torch.isfinite(encoded).all()
