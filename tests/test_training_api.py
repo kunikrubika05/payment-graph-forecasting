@@ -56,6 +56,20 @@ def test_train_glformer_model_wraps_legacy_function(monkeypatch):
     assert result.history["received"] == 3
 
 
+def test_train_glformer_model_strips_sampling_backend_for_legacy_auto(monkeypatch):
+    def _fake_train_glformer(**kwargs):
+        assert "sampling_backend" not in kwargs
+        return "glformer-model", {"train_loss": [0.25], "received": kwargs["patience"]}
+
+    import src.models.GLFormer.glformer_train as legacy_train
+
+    monkeypatch.setattr(legacy_train, "train_glformer", _fake_train_glformer)
+    result = train_glformer_model(patience=4, sampling_backend="auto")
+
+    assert result.model == "glformer-model"
+    assert result.history["received"] == 4
+
+
 def test_train_glformer_model_dispatches_sampler_backend(monkeypatch):
     def _fake_train_glformer_cuda(**kwargs):
         return "glformer-cuda-model", {"train_loss": [0.2], "received": kwargs["sampling_backend"]}

@@ -44,7 +44,9 @@ def train_glformer_model(**kwargs: Any) -> TrainingRunResult:
 
     from src.models.GLFormer.glformer_train import train_glformer
 
-    model, history = train_glformer(**kwargs)
+    legacy_kwargs = dict(kwargs)
+    legacy_kwargs.pop("sampling_backend", None)
+    model, history = train_glformer(**legacy_kwargs)
     return TrainingRunResult(model=model, history=history)
 
 
