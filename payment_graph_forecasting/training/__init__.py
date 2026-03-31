@@ -2,6 +2,7 @@
 
 from payment_graph_forecasting.training.api import (
     TrainingRunResult,
+    train_dygformer_model,
     train_eagle_model,
     train_glformer_model,
     train_graphmixer_model,
@@ -11,6 +12,7 @@ from payment_graph_forecasting.training.api import (
 
 __all__ = [
     "TrainingRunResult",
+    "train_dygformer_model",
     "train_graphmixer_model",
     "train_eagle_model",
     "train_glformer_model",

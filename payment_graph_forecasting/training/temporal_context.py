@@ -24,7 +24,10 @@ class NodeTemporalContext:
 def to_device_tensor(arr, device: torch.device, dtype=torch.float32) -> torch.Tensor:
     """Convert an array-like object to a torch tensor on the target device."""
 
-    return torch.tensor(arr, dtype=dtype, device=device)
+    tensor = torch.as_tensor(arr, dtype=dtype)
+    if tensor.device == device:
+        return tensor
+    return tensor.to(device=device, non_blocking=device.type == "cuda")
 
 
 def sample_node_contexts(

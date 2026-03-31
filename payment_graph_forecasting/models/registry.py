@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from payment_graph_forecasting.models.base import BaseModelAdapter
+from payment_graph_forecasting.models.dygformer import DyGFormerAdapter
 from payment_graph_forecasting.models.eagle import EAGLEAdapter
 from payment_graph_forecasting.models.glformer import GLFormerAdapter
 from payment_graph_forecasting.models.graphmixer import GraphMixerAdapter
@@ -13,6 +14,7 @@ from payment_graph_forecasting.models.sg_graphmixer import SGGraphMixerAdapter
 
 MODEL_REGISTRY: dict[str, BaseModelAdapter] = {
     "graphmixer": GraphMixerAdapter(),
+    "dygformer": DyGFormerAdapter(),
     "eagle": EAGLEAdapter(),
     "glformer": GLFormerAdapter(),
     "hyperevent": HyperEventAdapter(),

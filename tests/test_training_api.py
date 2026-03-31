@@ -1,5 +1,6 @@
 from payment_graph_forecasting.training import (
     TrainingRunResult,
+    train_dygformer_model,
     train_eagle_model,
     train_glformer_model,
     train_graphmixer_model,
@@ -10,6 +11,7 @@ from payment_graph_forecasting.training import (
 
 def test_training_api_exports_are_importable():
     assert TrainingRunResult is not None
+    assert callable(train_dygformer_model)
     assert callable(train_graphmixer_model)
     assert callable(train_eagle_model)
     assert callable(train_glformer_model)
@@ -41,6 +43,46 @@ def test_train_eagle_model_wraps_legacy_function(monkeypatch):
 
     assert result.model == "eagle-model"
     assert result.history["received"] == 16
+
+
+def test_train_dygformer_model_wraps_legacy_function(monkeypatch):
+    def _fake_train_dygformer(**kwargs):
+        return "dygformer-model", {"train_loss": [0.4], "received": kwargs["patch_size"]}
+
+    import src.models.DyGFormer.dygformer_train as legacy_train
+
+    monkeypatch.setattr(legacy_train, "train_dygformer", _fake_train_dygformer)
+    result = train_dygformer_model(patch_size=4)
+
+    assert result.model == "dygformer-model"
+    assert result.history["received"] == 4
+
+
+def test_train_dygformer_model_strips_sampling_backend_for_legacy_auto(monkeypatch):
+    def _fake_train_dygformer(**kwargs):
+        assert "sampling_backend" not in kwargs
+        return "dygformer-model", {"train_loss": [0.4], "received": kwargs["patch_size"]}
+
+    import src.models.DyGFormer.dygformer_train as legacy_train
+
+    monkeypatch.setattr(legacy_train, "train_dygformer", _fake_train_dygformer)
+    result = train_dygformer_model(patch_size=4, sampling_backend="auto")
+
+    assert result.model == "dygformer-model"
+    assert result.history["received"] == 4
+
+
+def test_train_dygformer_model_dispatches_sampler_backend(monkeypatch):
+    def _fake_train_dygformer_cuda(**kwargs):
+        return "dygformer-cuda-model", {"train_loss": [0.3], "received": kwargs["sampling_backend"]}
+
+    import src.models.DyGFormer.dygformer_cuda_train as cuda_train
+
+    monkeypatch.setattr(cuda_train, "train_dygformer_cuda", _fake_train_dygformer_cuda)
+    result = train_dygformer_model(sampling_backend="cuda")
+
+    assert result.model == "dygformer-cuda-model"
+    assert result.history["received"] == "cuda"
 
 
 def test_train_glformer_model_wraps_legacy_function(monkeypatch):

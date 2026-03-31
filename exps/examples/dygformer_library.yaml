@@ -1,0 +1,37 @@
+experiment:
+  name: dygformer_library_smoke
+  model: dygformer
+
+data:
+  source: orbitaal_stream_graph
+  parquet_path: /tmp/orbitaal_stream_graph.parquet
+  fraction: 0.1
+  train_ratio: 0.70
+  val_ratio: 0.15
+
+sampling:
+  strategy: tgb_mixed
+  num_neighbors: 32
+  n_random_neg: 50
+  n_hist_neg: 50
+
+training:
+  epochs: 1
+  batch_size: 32
+  lr: 0.0001
+  patience: 1
+
+runtime:
+  device: cpu
+  amp: false
+  dry_run: true
+
+model:
+  patch_size: 1
+  time_dim: 100
+  aligned_dim: 50
+  num_transformer_layers: 2
+  num_attention_heads: 2
+  cooc_dim: 50
+  output_dim: 172
+  neg_per_positive: 5

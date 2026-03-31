@@ -16,7 +16,7 @@ from payment_graph_forecasting.sampling.strategy import NegativeSamplingStrategy
 
 
 def test_registry_contains_priority_models():
-    assert {"graphmixer", "eagle", "glformer", "hyperevent", "sg_graphmixer", "pairwise_mlp"} <= set(MODEL_REGISTRY)
+    assert {"graphmixer", "dygformer", "eagle", "glformer", "hyperevent", "sg_graphmixer", "pairwise_mlp"} <= set(MODEL_REGISTRY)
 
 
 def test_get_model_adapter_returns_expected_adapter():
@@ -169,6 +169,48 @@ def test_build_execution_plan_exposes_canonical_model_contract(tmp_path: Path):
     assert plan.runner_kwargs["dry_run"] is True
 
 
+def test_dygformer_execution_plan_carries_dropout(tmp_path: Path):
+    spec_path = tmp_path / "exp.yaml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "experiment:",
+                "  name: dygformer_plan",
+                "  model: dygformer",
+                "training:",
+                "  dropout: 0.25",
+                "runtime:",
+                "  dry_run: true",
+            ]
+        )
+    )
+
+    spec = load_experiment_spec(spec_path)
+    plan = build_execution_plan(spec)
+    assert plan.runner_kwargs["dropout"] == 0.25
+
+
+def test_dygformer_execution_plan_carries_sampling_backend(tmp_path: Path):
+    spec_path = tmp_path / "exp.yaml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "experiment:",
+                "  name: dygformer_plan",
+                "  model: dygformer",
+                "sampling:",
+                "  backend: cuda",
+                "runtime:",
+                "  dry_run: true",
+            ]
+        )
+    )
+
+    spec = load_experiment_spec(spec_path)
+    plan = build_execution_plan(spec)
+    assert plan.runner_kwargs["sampling_backend"] == "cuda"
+
+
 def test_launcher_main_dry_run(tmp_path: Path):
     spec_path = tmp_path / "exp.yaml"
     spec_path.write_text(
@@ -196,6 +238,7 @@ def test_repository_example_spec_loads():
     ("path", "model_name"),
     [
         ("exps/examples/graphmixer_library.yaml", "graphmixer"),
+        ("exps/examples/dygformer_library.yaml", "dygformer"),
         ("exps/examples/sg_graphmixer_library.yaml", "sg_graphmixer"),
         ("exps/examples/eagle_library.yaml", "eagle"),
         ("exps/examples/glformer_library.yaml", "glformer"),
