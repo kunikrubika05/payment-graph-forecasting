@@ -83,6 +83,25 @@ def test_train_glformer_model_dispatches_sampler_backend(monkeypatch):
     assert result.history["received"] == "cpp"
 
 
+def test_train_glformer_model_strips_legacy_adj_for_sampler_backend(monkeypatch):
+    def _fake_train_glformer_cuda(**kwargs):
+        assert "adj" not in kwargs
+        assert "node_mapping" not in kwargs
+        return "glformer-cuda-model", {"train_loss": [0.2], "received": kwargs["sampling_backend"]}
+
+    import src.models.GLFormer_cuda.glformer_train as legacy_train
+
+    monkeypatch.setattr(legacy_train, "train_glformer_cuda", _fake_train_glformer_cuda)
+    result = train_glformer_model(
+        sampling_backend="cuda",
+        adj="legacy-adj",
+        node_mapping="legacy-mapping",
+    )
+
+    assert result.model == "glformer-cuda-model"
+    assert result.history["received"] == "cuda"
+
+
 def test_train_hyperevent_model_wraps_legacy_function(monkeypatch):
     def _fake_train_hyperevent(**kwargs):
         return "hyperevent-model", {"train_loss": [0.2], "received": kwargs["n_neighbor"]}

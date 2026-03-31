@@ -39,7 +39,10 @@ def train_glformer_model(**kwargs: Any) -> TrainingRunResult:
     if sampling_backend not in (None, "auto"):
         from src.models.GLFormer_cuda.glformer_train import train_glformer_cuda
 
-        model, history = train_glformer_cuda(**kwargs)
+        sampler_kwargs = dict(kwargs)
+        sampler_kwargs.pop("adj", None)
+        sampler_kwargs.pop("node_mapping", None)
+        model, history = train_glformer_cuda(**sampler_kwargs)
         return TrainingRunResult(model=model, history=history)
 
     from src.models.GLFormer.glformer_train import train_glformer
