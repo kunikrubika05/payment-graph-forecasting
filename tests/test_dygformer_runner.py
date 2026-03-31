@@ -16,6 +16,7 @@ def test_dygformer_arg_parser_supports_dry_run():
     parser = build_dygformer_arg_parser()
     args = parser.parse_args(["--parquet-path", "/tmp/stream.parquet", "--dry-run"])
     assert args.parquet_path == "/tmp/stream.parquet"
+    assert args.sampling_backend == "auto"
     assert args.dry_run is True
 
 
@@ -33,6 +34,7 @@ def test_dygformer_runner_dry_run_returns_payload(tmp_path):
         data_backend="yadisk",
         data_cache_dir=None,
         data_token_env="YADISK_TOKEN",
+        sampling_backend="cuda",
         train_ratio=0.7,
         val_ratio=0.15,
         fraction=0.1,
@@ -73,6 +75,7 @@ def test_dygformer_runner_dry_run_returns_payload(tmp_path):
     assert result["parquet_path"] == "/tmp/stream.parquet"
     assert result["patch_size"] == 2
     assert result["neg_per_positive"] == 3
+    assert result["sampling_backend"] == "cuda"
 
 
 def test_dygformer_forward_stays_finite():

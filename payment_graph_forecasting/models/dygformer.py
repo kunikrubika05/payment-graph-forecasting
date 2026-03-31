@@ -30,6 +30,7 @@ class DyGFormerAdapter(BaseRunnerAdapter):
             "data_backend": spec.data.download_backend,
             "data_cache_dir": spec.data.cache_dir,
             "data_token_env": spec.data.token_env,
+            "sampling_backend": spec.sampling.backend,
             "train_ratio": spec.data.train_ratio,
             "val_ratio": spec.data.val_ratio,
             "fraction": spec.data.fraction,

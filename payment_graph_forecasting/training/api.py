@@ -35,9 +35,18 @@ def train_eagle_model(**kwargs: Any) -> TrainingRunResult:
 def train_dygformer_model(**kwargs: Any) -> TrainingRunResult:
     """Train DyGFormer through the stable library API."""
 
+    sampling_backend = kwargs.get("sampling_backend")
+    if sampling_backend not in (None, "auto"):
+        from src.models.DyGFormer.dygformer_cuda_train import train_dygformer_cuda
+
+        model, history = train_dygformer_cuda(**kwargs)
+        return TrainingRunResult(model=model, history=history)
+
     from src.models.DyGFormer.dygformer_train import train_dygformer
 
-    model, history = train_dygformer(**kwargs)
+    legacy_kwargs = dict(kwargs)
+    legacy_kwargs.pop("sampling_backend", None)
+    model, history = train_dygformer(**legacy_kwargs)
     return TrainingRunResult(model=model, history=history)
 
 

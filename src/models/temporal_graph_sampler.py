@@ -26,8 +26,10 @@ Backends:
 """
 
 import logging
+import importlib.util
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -78,14 +80,14 @@ class FeatureBatch:
 
 def _try_load_cpp():
     """Try to load the C++ temporal sampling extension."""
+    ext_name = "temporal_sampling_cpp"
     try:
         from torch.utils.cpp_extension import load as _load_ext
-        from pathlib import Path
         cpp_path = str(Path(__file__).parent / "csrc" / "temporal_sampling.cpp")
         build_dir = str(Path(__file__).parent / "csrc" / "build")
         if Path(cpp_path).exists():
             ext = _load_ext(
-                name="temporal_sampling_cpp",
+                name=ext_name,
                 sources=[cpp_path],
                 build_directory=build_dir,
                 extra_cflags=["-O3"],
@@ -94,23 +96,45 @@ def _try_load_cpp():
             return ext
     except Exception as e:
         logger.debug("C++ extension unavailable: %s", e)
+    return _load_prebuilt_extension(ext_name, Path(__file__).parent / "csrc" / "build")
+
+
+def _load_prebuilt_extension(module_name: str, build_dir: Path):
+    """Load an already-built extension from the local build directory."""
+    if not build_dir.exists():
+        return None
+    suffixes = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+    candidates = sorted(
+        path for path in build_dir.iterdir()
+        if path.name.startswith(module_name) and path.name.endswith(suffixes)
+    )
+    for candidate in reversed(candidates):
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, candidate)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        except Exception as e:
+            logger.debug("Prebuilt extension load failed for %s: %s", candidate, e)
     return None
 
 
 def _try_load_cuda():
     """Try to load the CUDA temporal sampling extension."""
+    ext_name = "temporal_sampling_cuda"
     try:
         import torch
         if not torch.cuda.is_available():
             return None
 
         from torch.utils.cpp_extension import load as _load_ext
-        from pathlib import Path
         cu_path = str(Path(__file__).parent / "csrc" / "temporal_sampling.cu")
         build_dir = str(Path(__file__).parent / "csrc" / "build_cuda")
         if Path(cu_path).exists():
             ext = _load_ext(
-                name="temporal_sampling_cuda",
+                name=ext_name,
                 sources=[cu_path],
                 build_directory=build_dir,
                 extra_cuda_cflags=["-O3"],
@@ -119,7 +143,7 @@ def _try_load_cuda():
             return ext
     except Exception as e:
         logger.debug("CUDA extension unavailable: %s", e)
-    return None
+    return _load_prebuilt_extension(ext_name, Path(__file__).parent / "csrc" / "build_cuda")
 
 
 _ext_cache = {}

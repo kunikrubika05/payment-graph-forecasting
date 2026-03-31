@@ -190,6 +190,27 @@ def test_dygformer_execution_plan_carries_dropout(tmp_path: Path):
     assert plan.runner_kwargs["dropout"] == 0.25
 
 
+def test_dygformer_execution_plan_carries_sampling_backend(tmp_path: Path):
+    spec_path = tmp_path / "exp.yaml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "experiment:",
+                "  name: dygformer_plan",
+                "  model: dygformer",
+                "sampling:",
+                "  backend: cuda",
+                "runtime:",
+                "  dry_run: true",
+            ]
+        )
+    )
+
+    spec = load_experiment_spec(spec_path)
+    plan = build_execution_plan(spec)
+    assert plan.runner_kwargs["sampling_backend"] == "cuda"
+
+
 def test_launcher_main_dry_run(tmp_path: Path):
     spec_path = tmp_path / "exp.yaml"
     spec_path.write_text(

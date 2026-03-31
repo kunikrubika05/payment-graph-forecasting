@@ -46,6 +46,7 @@ def build_dygformer_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-backend", type=str, default="yadisk")
     parser.add_argument("--data-cache-dir", type=str, default=None)
     parser.add_argument("--data-token-env", type=str, default="YADISK_TOKEN")
+    parser.add_argument("--sampling-backend", type=str, default="auto")
     parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--val-ratio", type=float, default=0.15)
     parser.add_argument("--fraction", type=float, default=None)
@@ -160,6 +161,7 @@ def run_dygformer_experiment(args: argparse.Namespace):
             node_mapping_path=args.node_mapping_path,
             node_mapping_remote_path=args.node_mapping_remote_path,
             fraction=args.fraction,
+            sampling_backend=getattr(args, "sampling_backend", "auto"),
             num_neighbors=args.num_neighbors,
             patch_size=args.patch_size,
             n_hist_neg=args.n_hist_neg,
@@ -249,6 +251,7 @@ def run_dygformer_experiment(args: argparse.Namespace):
         edge_feat_dim=args.edge_feat_dim,
         node_feat_dim=args.node_feat_dim,
         neg_per_positive=args.neg_per_positive,
+        sampling_backend=getattr(args, "sampling_backend", "auto"),
     )
     model = training_result.model
     history = training_result.history

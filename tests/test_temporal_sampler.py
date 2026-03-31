@@ -12,9 +12,14 @@ Run:
     PYTHONPATH=. pytest tests/test_temporal_sampler.py -v
 """
 
+import importlib.machinery
+import types
+
 import numpy as np
 import pytest
+import torch
 
+import src.models.temporal_graph_sampler as temporal_graph_sampler
 from src.models.temporal_graph_sampler import (
     TemporalGraphSampler,
     NeighborBatch,
@@ -87,6 +92,70 @@ def _has_cuda():
         return _try_load_cuda() is not None
     except Exception:
         return False
+
+
+def test_load_prebuilt_extension_uses_existing_binary(tmp_path, monkeypatch):
+    build_dir = tmp_path / "build_cuda"
+    build_dir.mkdir()
+    suffix = importlib.machinery.EXTENSION_SUFFIXES[0]
+    candidate = build_dir / f"temporal_sampling_cuda{suffix}"
+    candidate.write_bytes(b"")
+
+    loaded = {}
+
+    class DummyLoader:
+        def exec_module(self, module):
+            module.marker = "loaded"
+            loaded["path"] = module.__file__
+
+    def fake_spec_from_file_location(name, location):
+        return types.SimpleNamespace(
+            loader=DummyLoader(),
+            name=name,
+            origin=str(location),
+        )
+
+    def fake_module_from_spec(spec):
+        return types.SimpleNamespace(__file__=spec.origin, __name__=spec.name)
+
+    monkeypatch.setattr(
+        temporal_graph_sampler.importlib.util,
+        "spec_from_file_location",
+        fake_spec_from_file_location,
+    )
+    monkeypatch.setattr(
+        temporal_graph_sampler.importlib.util,
+        "module_from_spec",
+        fake_module_from_spec,
+    )
+
+    module = temporal_graph_sampler._load_prebuilt_extension(
+        "temporal_sampling_cuda", build_dir
+    )
+
+    assert module is not None
+    assert module.marker == "loaded"
+    assert loaded["path"] == str(candidate)
+
+
+def test_try_load_cuda_falls_back_to_prebuilt_binary(monkeypatch, tmp_path):
+    fallback_module = object()
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(temporal_graph_sampler.Path, "exists", lambda self: True)
+
+    def fail_load(*args, **kwargs):
+        raise RuntimeError("ninja missing")
+
+    monkeypatch.setattr(
+        temporal_graph_sampler,
+        "_load_prebuilt_extension",
+        lambda name, path: fallback_module,
+    )
+    monkeypatch.setattr("torch.utils.cpp_extension.load", fail_load)
+
+    module = temporal_graph_sampler._try_load_cuda()
+    assert module is fallback_module
 
 
 class TestPythonBackend:
