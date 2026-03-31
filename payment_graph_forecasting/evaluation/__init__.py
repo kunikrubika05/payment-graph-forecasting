@@ -2,6 +2,7 @@
 
 from payment_graph_forecasting.evaluation.api import (
     EvaluationRunResult,
+    evaluate_dygformer_model,
     evaluate_eagle_model,
     evaluate_glformer_model,
     evaluate_graphmixer_model,
@@ -11,6 +12,7 @@ from payment_graph_forecasting.evaluation.api import (
 
 __all__ = [
     "EvaluationRunResult",
+    "evaluate_dygformer_model",
     "evaluate_graphmixer_model",
     "evaluate_eagle_model",
     "evaluate_glformer_model",

@@ -16,7 +16,7 @@ from payment_graph_forecasting.sampling.strategy import NegativeSamplingStrategy
 
 
 def test_registry_contains_priority_models():
-    assert {"graphmixer", "eagle", "glformer", "hyperevent", "sg_graphmixer", "pairwise_mlp"} <= set(MODEL_REGISTRY)
+    assert {"graphmixer", "dygformer", "eagle", "glformer", "hyperevent", "sg_graphmixer", "pairwise_mlp"} <= set(MODEL_REGISTRY)
 
 
 def test_get_model_adapter_returns_expected_adapter():
@@ -196,6 +196,7 @@ def test_repository_example_spec_loads():
     ("path", "model_name"),
     [
         ("exps/examples/graphmixer_library.yaml", "graphmixer"),
+        ("exps/examples/dygformer_library.yaml", "dygformer"),
         ("exps/examples/sg_graphmixer_library.yaml", "sg_graphmixer"),
         ("exps/examples/eagle_library.yaml", "eagle"),
         ("exps/examples/glformer_library.yaml", "glformer"),

@@ -32,6 +32,15 @@ def train_eagle_model(**kwargs: Any) -> TrainingRunResult:
     return TrainingRunResult(model=model, history=history)
 
 
+def train_dygformer_model(**kwargs: Any) -> TrainingRunResult:
+    """Train DyGFormer through the stable library API."""
+
+    from src.models.DyGFormer.dygformer_train import train_dygformer
+
+    model, history = train_dygformer(**kwargs)
+    return TrainingRunResult(model=model, history=history)
+
+
 def train_glformer_model(**kwargs: Any) -> TrainingRunResult:
     """Train GLFormer through the stable library API."""
 

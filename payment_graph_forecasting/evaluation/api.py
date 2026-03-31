@@ -31,6 +31,15 @@ def evaluate_eagle_model(**kwargs: Any) -> EvaluationRunResult:
     return EvaluationRunResult(metrics=metrics)
 
 
+def evaluate_dygformer_model(**kwargs: Any) -> EvaluationRunResult:
+    """Evaluate DyGFormer through the stable library API."""
+
+    from src.models.DyGFormer.dygformer_evaluate import evaluate_tgb_style
+
+    metrics = evaluate_tgb_style(**kwargs)
+    return EvaluationRunResult(metrics=metrics)
+
+
 def evaluate_glformer_model(**kwargs: Any) -> EvaluationRunResult:
     """Evaluate GLFormer through the stable library API."""
 

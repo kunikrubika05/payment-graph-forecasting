@@ -1,5 +1,6 @@
 from payment_graph_forecasting.training import (
     TrainingRunResult,
+    train_dygformer_model,
     train_eagle_model,
     train_glformer_model,
     train_graphmixer_model,
@@ -10,6 +11,7 @@ from payment_graph_forecasting.training import (
 
 def test_training_api_exports_are_importable():
     assert TrainingRunResult is not None
+    assert callable(train_dygformer_model)
     assert callable(train_graphmixer_model)
     assert callable(train_eagle_model)
     assert callable(train_glformer_model)
@@ -41,6 +43,19 @@ def test_train_eagle_model_wraps_legacy_function(monkeypatch):
 
     assert result.model == "eagle-model"
     assert result.history["received"] == 16
+
+
+def test_train_dygformer_model_wraps_legacy_function(monkeypatch):
+    def _fake_train_dygformer(**kwargs):
+        return "dygformer-model", {"train_loss": [0.4], "received": kwargs["patch_size"]}
+
+    import src.models.DyGFormer.dygformer_train as legacy_train
+
+    monkeypatch.setattr(legacy_train, "train_dygformer", _fake_train_dygformer)
+    result = train_dygformer_model(patch_size=4)
+
+    assert result.model == "dygformer-model"
+    assert result.history["received"] == 4
 
 
 def test_train_glformer_model_wraps_legacy_function(monkeypatch):
