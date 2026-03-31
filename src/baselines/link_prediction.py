@@ -17,8 +17,6 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
 
 from src.baselines.config import (
     ExperimentConfig, NODE_FEATURE_COLUMNS,
@@ -38,6 +36,20 @@ from src.baselines.experiment_logger import ExperimentLogger
 logger = logging.getLogger(__name__)
 
 EVAL_BATCH_SIZE = 1000
+
+
+def _require_sklearn():
+    """Import optional scikit-learn dependency only on model-training paths."""
+
+    try:
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.metrics import average_precision_score
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "scikit-learn is required for baseline model training and scoring paths"
+        ) from exc
+    return LogisticRegression, RandomForestClassifier, average_precision_score
 
 
 def _get_edges_set(snapshot: pd.DataFrame) -> Set[Tuple[int, int]]:
@@ -452,7 +464,7 @@ def hp_search(
     Returns:
         Tuple of (best_params, all_results).
     """
-    from sklearn.metrics import average_precision_score
+    _, _, average_precision_score = _require_sklearn()
 
     if model_name == "logreg":
         grid = LOGREG_HP_GRID
@@ -509,6 +521,7 @@ def hp_search(
 
 def _create_model(model_name: str, params: dict):
     """Create a model instance with given hyperparameters."""
+    LogisticRegression, RandomForestClassifier, _ = _require_sklearn()
     if model_name == "logreg":
         l1_ratio = 1.0 if params["penalty"] == "l1" else 0.0
         solver = "saga" if params["penalty"] == "l1" else "lbfgs"

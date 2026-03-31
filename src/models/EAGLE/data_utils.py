@@ -22,7 +22,23 @@ from typing import Tuple, Optional
 import numpy as np
 import pandas as pd
 import torch
-from torch_geometric.data import TemporalData
+
+try:
+    from torch_geometric.data import TemporalData
+except ModuleNotFoundError:
+    # TODO(REFACTORING): drop this lightweight TemporalData fallback once the new data layer no longer imports torch_geometric on lightweight code paths.
+    class TemporalData:  # type: ignore[override]
+        """Small fallback used when torch_geometric is unavailable.
+
+        It only implements the attribute container behavior required by tests and
+        by the current stream-graph conversion helpers.
+        """
+
+        def __init__(self, src, dst, t, msg):
+            self.src = src
+            self.dst = dst
+            self.t = t
+            self.msg = msg
 
 from src.models.data_utils import (
     TemporalEdgeData,

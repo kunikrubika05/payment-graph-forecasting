@@ -10,7 +10,6 @@ src/models/train.py:
     4. Uses weight_decay (Adam) as a hyperparameter.
 """
 
-import contextlib
 import json
 import logging
 import os
@@ -23,6 +22,12 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from payment_graph_forecasting.training.amp import (
+    amp_enabled_for_device,
+    autocast_context,
+    create_grad_scaler,
+    seed_torch,
+)
 from src.models.GraphMixer.graphmixer import GraphMixerTime
 from src.models.GraphMixer.data_utils import (
     TemporalEdgeData,
@@ -33,13 +38,6 @@ from src.models.GraphMixer.data_utils import (
 from src.models.data_utils import featurize_neighbors
 
 logger = logging.getLogger(__name__)
-
-
-def _amp_autocast(enabled: bool, device_type: str):
-    """Return AMP autocast context or a no-op context manager."""
-    if enabled and device_type == "cuda":
-        return torch.cuda.amp.autocast()
-    return contextlib.nullcontext()
 
 
 def prepare_graphmixer_batch(
@@ -225,7 +223,7 @@ def train_epoch(
             use_node_feats=use_node_feats,
         )
 
-        with _amp_autocast(amp_enabled, device.type):
+        with autocast_context(amp_enabled, device.type):
             pos_logits = model(
                 src_delta_times=batch["src_delta_times"],
                 src_lengths=batch["src_lengths"],
@@ -392,7 +390,7 @@ def validate(
         def _t(arr, dtype=torch.float32):
             return torch.tensor(arr, dtype=dtype, device=device)
 
-        with _amp_autocast(amp_enabled, device.type):
+        with autocast_context(amp_enabled, device.type):
             h_src = model.encode_nodes(
                 _t(src_dt), _t(src_lens, torch.int64),
                 edge_feats=_t(src_ef) if src_ef is not None else None,
@@ -486,9 +484,7 @@ def train_graphmixer(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     rng = np.random.default_rng(seed)
-    torch.manual_seed(seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed(seed)
+    seed_torch(seed, device)
 
     train_csr = build_temporal_csr(data, train_mask)
     full_csr = build_temporal_csr(data, train_mask | val_mask)
@@ -512,8 +508,8 @@ def train_graphmixer(
     optimizer = torch.optim.Adam(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
-    amp_enabled = use_amp and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    amp_enabled = amp_enabled_for_device(use_amp, device)
+    scaler = create_grad_scaler(amp_enabled)
 
     train_indices = np.where(train_mask)[0]
     val_indices = np.where(val_mask)[0]

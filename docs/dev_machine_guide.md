@@ -77,13 +77,14 @@ cd payment-graph-forecasting
 # Создать виртуальное окружение и установить зависимости
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[dl,hpo,dev]"
 
-# Собрать C++ расширение для neighbor sampling
-PYTHONPATH=. python src/models/build_ext.py
+# Собрать optional C++/CUDA расширения, если они нужны
+./venv/bin/python -m payment_graph_forecasting.infra.extensions
 
-# Проверить что всё работает
-PYTHONPATH=. python -m pytest tests/test_models.py -v
+# Проверить что package launcher работает
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    --config exps/examples/graphmixer_library.yaml --dry-run
 ```
 
 ## 4. Запуск эксперимента
@@ -94,34 +95,67 @@ PYTHONPATH=. python -m pytest tests/test_models.py -v
 
 ```bash
 # Создать tmux-сессию
-tmux new -s gm
+tmux new -s pfg
 
 # Внутри tmux: активировать venv и задать токен
 cd ~/payment-graph-forecasting && source venv/bin/activate
 export YADISK_TOKEN="<токен Яндекс.Диска>"
 
-# Запустить эксперимент
-PYTHONPATH=. python src/models/launcher.py \
-    --period mature_2020q2 \
-    --window 7 \
-    2>&1 | tee /tmp/graphmixer.log
+# Запустить эксперимент через package launcher
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    --config exps/examples/graphmixer_library.yaml \
+    2>&1 | tee /tmp/pfg_experiment.log
 
 # Отсоединиться от tmux: Ctrl+B, затем D
 ```
 
-### Параметры launcher.py
+### Рекомендуемый путь запуска
 
-| Параметр | Дефолт | Описание |
-|----------|--------|----------|
-| `--period` | (обязательный) | Период: early_2012q1, mature_2020q2, late_2020q4 и др. |
-| `--window` | 7 | Размер окна (дни): 3, 7, 14, 30 |
-| `--epochs` | 100 | Макс. число эпох |
-| `--batch-size` | 600 | Размер батча |
-| `--lr` | 0.0001 | Learning rate |
-| `--hidden-dim` | 100 | Размер скрытого слоя |
-| `--num-neighbors` | 20 | Число соседей для sampling |
-| `--patience` | 20 | Early stopping patience |
-| `--output` | /tmp/graphmixer_results | Куда сохранять результаты |
+Для новых запусков используй YAML-конфиги через
+`payment_graph_forecasting.experiments.launcher`.
+
+Базовые примеры:
+
+```bash
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    --config exps/examples/graphmixer_library.yaml --dry-run
+
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    --config exps/examples/sg_graphmixer_library.yaml --dry-run
+
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    --config exps/examples/pairwise_mlp_library.yaml --dry-run
+```
+
+Типовые секции YAML:
+
+| Поле | Описание |
+|----------|----------|
+| `experiment.model` | Имя library модели |
+| `data.*` | Источник данных и data-specific параметры |
+| `sampling.*` | Негативы, sampler backend и др. |
+| `training.*` | Эпохи, batch size, lr, patience |
+| `runtime.*` | `device`, `amp`, `dry_run`, `output_dir` |
+| `model.*` | model-specific параметры |
+
+### Legacy launchers
+
+Старые `src/models/*` launchers всё ещё есть для совместимости и исторических
+экспериментов, но это уже не основной рекомендуемый surface.
+
+### Optional extension build
+
+Для сборки optional C++/CUDA extensions используй package-facing entrypoint:
+
+```bash
+# Для реальной сборки нужен `ninja` в активном окружении.
+./venv/bin/python -m payment_graph_forecasting.infra.extensions
+./venv/bin/python -m payment_graph_forecasting.infra.extensions --all --graph-metrics
+./venv/bin/python -m payment_graph_forecasting.infra.extensions --graph-metrics-cuda
+```
+
+`src/models/build_ext.py` сохранён как compatibility shim для старых инструкций
+и исторических запусков.
 
 ### Получение YADISK_TOKEN
 
@@ -137,17 +171,17 @@ PYTHONPATH=. python src/models/launcher.py \
 ### Подключение к работающей сессии
 ```bash
 # Из другого SSH-окна (или после переподключения)
-tmux attach -t gm
+tmux attach -t pfg
 # Отсоединиться обратно: Ctrl+B, затем D
 ```
 
 ### Просмотр логов
 ```bash
 # Последние строки лога
-tail -20 /tmp/graphmixer.log
+tail -20 /tmp/pfg_experiment.log
 
 # Следить в реальном времени
-tail -f /tmp/graphmixer.log
+tail -f /tmp/pfg_experiment.log
 ```
 
 ### Проверка GPU
@@ -166,7 +200,7 @@ watch -n 2 nvidia-smi
 
 ### Проверка что процесс жив
 ```bash
-ps aux | grep launcher
+ps aux | grep payment_graph_forecasting.experiments.launcher
 ```
 
 ### Проверка RAM
@@ -189,15 +223,14 @@ scp -i /path/to/your-key.pem -r \
 
 ### Структура результатов
 ```
-graphmixer_<period>_w<window>/
-    config.json           # Гиперпараметры
-    data_summary.json     # Статистика данных (узлы, рёбра, split)
-    training_curves.csv   # Метрики по эпохам
-    metrics.jsonl         # Подробные метрики (JSON Lines)
+<run_name>/
+    data_summary.json     # Статистика данных
+    training_curves.csv   # Метрики по эпохам (если путь их пишет)
+    metrics.jsonl         # Подробные метрики
     experiment.log        # Полный лог
-    best_model.pt         # Лучшая модель (по val MRR)
-    final_results.json    # Итоговые тестовые метрики + тайминги
-    summary.json          # Краткая сводка (best epoch, best val MRR)
+    best_model.pt         # Лучшая модель
+    final_results.json    # Итоговые метрики + тайминги
+    summary.json          # Training summary (если путь его пишет)
 ```
 
 ### Удаление сервера
@@ -213,11 +246,14 @@ graphmixer_<period>_w<window>/
 cd ~/payment-graph-forecasting
 git pull
 source venv/bin/activate
-pip install -r requirements.txt
-PYTHONPATH=. python src/models/build_ext.py
+pip install -e ".[dl,hpo,dev]"
+./venv/bin/python -m payment_graph_forecasting.infra.extensions
+
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    --config exps/examples/graphmixer_library.yaml --dry-run
 ```
 
-Если были локальные изменения (например, вручную правили requirements.txt):
+Если были локальные изменения:
 ```bash
 git checkout -- . && git pull
 ```
@@ -228,8 +264,8 @@ git checkout -- . && git pull
 |----------|---------|
 | `Permission denied (publickey)` | `chmod 600 your-key.pem` |
 | `Python.h: No such file or directory` | `sudo apt install python3.12-dev` |
-| SSH обрывается, процесс пропал | Процесс в tmux жив: `tmux attach -t gm` |
+| SSH обрывается, процесс пропал | Процесс в tmux жив: `tmux attach -t pfg` |
 | tmux-сессия исчезла | OOM-killer убил процесс: `dmesg \| grep -i oom` |
-| GPU-Util = 0% во время тренировки | Bottleneck на CPU (neighbor sampling), это нормально между батчами |
+| GPU-Util = 0% во время тренировки | Возможен bottleneck на CPU / sampling backend, это не всегда ошибка |
 | `CUDA out of memory` | Уменьшить `--batch-size` или `--num-neighbors` |
 | pip install зависает/обрывается | SSH keepalive или запускать pip в tmux |

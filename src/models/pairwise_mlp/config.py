@@ -164,6 +164,9 @@ class PairMLPConfig:
     local_data_dir:       str  = "/tmp/pairmlp_data"
     local_precompute_dir: str  = "/tmp/pairmlp_precompute"
     local_output_dir:     str  = "/tmp/pairmlp_results"
+    remote_precompute_dir: Optional[str] = None
+    remote_results_root: Optional[str] = None
+    token_env: str = "YADISK_TOKEN"
     upload:               bool = False
 
     # ---------------------------------------------------------------------------
@@ -213,10 +216,14 @@ class PairMLPConfig:
 
     @property
     def yadisk_precompute_dir(self) -> str:
+        if self.remote_precompute_dir:
+            return self.remote_precompute_dir.rstrip("/")
         return f"{YADISK_EXPERIMENTS_BASE}/pairmlp_precompute_{self.label}"
 
     @property
     def yadisk_results_dir(self) -> str:
+        if self.remote_results_root:
+            return f"{self.remote_results_root.rstrip('/')}/{self.exp_name}"
         return f"{YADISK_EXPERIMENTS_BASE}/{self.exp_name}"
 
     # ---------------------------------------------------------------------------

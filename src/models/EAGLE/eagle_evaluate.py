@@ -10,7 +10,6 @@ Matches sg_baselines protocol exactly (CORRECTNESS_CHECKLIST.md):
 - Seeds: val=42+300, test=42+400
 """
 
-import contextlib
 import logging
 import time
 from typing import Dict, Optional, Set
@@ -19,24 +18,29 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from payment_graph_forecasting.evaluation.ranking_loop import (
+    choose_query_indices,
+    evaluate_ranking_loop,
+)
+from payment_graph_forecasting.training.amp import autocast_context
+from payment_graph_forecasting.training.amp import amp_enabled_for_device
+from payment_graph_forecasting.evaluation.temporal_ranking import (
+    conservative_rank_from_scores,
+    score_candidate_contexts,
+)
+from payment_graph_forecasting.training.temporal_context import (
+    sample_node_contexts,
+    to_device_tensor,
+)
 from src.models.EAGLE.eagle import EAGLETime
 from src.models.EAGLE.data_utils import (
     TemporalEdgeData,
     TemporalCSR,
     sample_neighbors_batch,
 )
-from src.models.data_utils import featurize_neighbors
-from src.baselines.evaluation import compute_ranking_metrics
 from sg_baselines.sampling import sample_negatives_for_eval
 
 logger = logging.getLogger(__name__)
-
-
-def _amp_autocast(enabled: bool, device_type: str):
-    """Return AMP autocast context or no-op."""
-    if enabled and device_type == "cuda":
-        return torch.cuda.amp.autocast()
-    return contextlib.nullcontext()
 
 
 def _get_forward_mask(data: TemporalEdgeData, split_mask: np.ndarray) -> np.ndarray:
@@ -100,7 +104,7 @@ def evaluate_tgb_style(
     """
     model.eval()
     rng = np.random.RandomState(seed)
-    amp_enabled = use_amp and device.type == "cuda"
+    amp_enabled = amp_enabled_for_device(use_amp, device)
     K = num_neighbors
     use_edge_feats = model.edge_feat_dim > 0
     use_node_feats = model.node_feat_dim > 0
@@ -143,14 +147,16 @@ def evaluate_tgb_style(
         all_positives_per_src.setdefault(int(s), set()).add(int(d))
 
     n_total = len(src_unique)
-    if n_total > max_queries:
-        rng_sub = np.random.RandomState(seed + 777)
-        idx = rng_sub.choice(n_total, size=max_queries, replace=False)
-        idx.sort()
-        src_unique = src_unique[idx]
-        dst_unique = dst_unique[idx]
-        eval_edge_indices = eval_edge_indices[idx]
-        logger.info("Subsampled %d -> %d queries", n_total, max_queries)
+    chosen = choose_query_indices(
+        n_total,
+        max_queries,
+        rng=np.random.RandomState(seed + 777),
+    )
+    if len(chosen) < n_total:
+        src_unique = src_unique[chosen]
+        dst_unique = dst_unique[chosen]
+        eval_edge_indices = eval_edge_indices[chosen]
+        logger.info("Subsampled %d -> %d queries", n_total, len(chosen))
 
     n_queries = len(src_unique)
     logger.info(
@@ -158,10 +164,7 @@ def evaluate_tgb_style(
         n_queries, n_negatives,
     )
 
-    all_ranks = []
-    start_time = time.time()
-
-    for q in tqdm(range(n_queries), desc="Evaluating"):
+    def _score_rank(q: int) -> float:
         src_node = int(src_unique[q])
         true_dst = int(dst_unique[q])
         edge_idx = eval_edge_indices[q]
@@ -181,66 +184,42 @@ def evaluate_tgb_style(
 
         src_arr = np.array([src_node], dtype=np.int32)
         ts_arr = np.array([ts], dtype=np.float64)
-        src_nids, src_nts, src_neids, src_lens = sample_neighbors_batch(
-            csr, src_arr, ts_arr, K
+        src_context = sample_node_contexts(
+            csr=csr,
+            data=data,
+            sample_neighbors_fn=sample_neighbors_batch,
+            nodes=src_arr,
+            query_timestamps=ts_arr,
+            num_neighbors=K,
+            use_edge_feats=use_edge_feats,
+            use_node_feats=use_node_feats,
         )
-        src_dt = np.maximum(
-            (ts_arr[:, None] - src_nts), 0.0
-        ).astype(np.float32)
 
         dst_ts_arr = np.full(num_candidates, ts, dtype=np.float64)
-        dst_nids, dst_nts, dst_neids, dst_lens = sample_neighbors_batch(
-            csr, all_dst, dst_ts_arr, K
+        dst_context = sample_node_contexts(
+            csr=csr,
+            data=data,
+            sample_neighbors_fn=sample_neighbors_batch,
+            nodes=all_dst,
+            query_timestamps=dst_ts_arr,
+            num_neighbors=K,
+            use_edge_feats=use_edge_feats,
+            use_node_feats=use_node_feats,
         )
-        dst_dt = np.maximum(
-            (dst_ts_arr[:, None] - dst_nts), 0.0
-        ).astype(np.float32)
 
-        src_ef = dst_ef = src_nf = dst_nf = None
-        if use_edge_feats or use_node_feats:
-            _, src_ef_raw, _ = featurize_neighbors(
-                src_nids, src_neids, src_lens, src_nts, ts_arr,
-                data.node_feats, data.edge_feats,
-            )
-            _, dst_ef_raw, _ = featurize_neighbors(
-                dst_nids, dst_neids, dst_lens, dst_nts, dst_ts_arr,
-                data.node_feats, data.edge_feats,
-            )
-            if use_edge_feats:
-                src_ef = src_ef_raw.astype(np.float32)
-                dst_ef = dst_ef_raw.astype(np.float32)
-            if use_node_feats:
-                src_nf = data.node_feats[[src_node]].astype(np.float32)
-                dst_nf = data.node_feats[all_dst].astype(np.float32)
+        scores = score_candidate_contexts(
+            model=model,
+            device=device,
+            src_context=src_context,
+            dst_context=dst_context,
+            amp_enabled=amp_enabled,
+        )
+        return conservative_rank_from_scores(scores)
 
-        def _t(arr, dtype=torch.float32):
-            return torch.tensor(arr, dtype=dtype, device=device)
-
-        with _amp_autocast(amp_enabled, device.type):
-            h_src = model.encode_nodes(
-                _t(src_dt), _t(src_lens, torch.int64),
-                edge_feats=_t(src_ef) if src_ef is not None else None,
-                node_feats=_t(src_nf) if src_nf is not None else None,
-            )
-            h_dst = model.encode_nodes(
-                _t(dst_dt), _t(dst_lens, torch.int64),
-                edge_feats=_t(dst_ef) if dst_ef is not None else None,
-                node_feats=_t(dst_nf) if dst_nf is not None else None,
-            )
-            h_src_exp = h_src.expand(num_candidates, -1)
-            scores = model.edge_predictor(
-                h_src_exp, h_dst
-            ).cpu().float().numpy()
-
-        true_score = scores[0]
-        rank = float(np.sum(scores[1:] > true_score) + 1)
-        all_ranks.append(rank)
-
-    elapsed = time.time() - start_time
-    ranks_arr = np.array(all_ranks, dtype=np.float64)
-    metrics = compute_ranking_metrics(ranks_arr)
-    metrics["eval_time_sec"] = elapsed
-    metrics["edges_per_sec"] = n_queries / elapsed if elapsed > 0 else 0
+    metrics, elapsed = evaluate_ranking_loop(
+        np.arange(n_queries),
+        score_rank_fn=lambda idx: _score_rank(idx),
+    )
     metrics["n_filtered"] = n_filtered
 
     logger.info(

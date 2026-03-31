@@ -256,6 +256,10 @@ def main():
         json.dump(results, f, indent=2)
 
     p = best.params
+    # TODO(REFACTORING): switch this recommendation to the package launcher once
+    # the GraphMixerTime + CUDA sampler training path has a first-class
+    # payment_graph_forecasting model contract distinct from snapshot GraphMixer
+    # and sg_graphmixer.
     train_cmd = (
         f"YADISK_TOKEN=\"$YADISK_TOKEN\" PYTHONPATH=. python"
         f" src/models/cuda_exp_graphmixer_a10/launcher.py"

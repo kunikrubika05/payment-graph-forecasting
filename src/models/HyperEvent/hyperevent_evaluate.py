@@ -26,8 +26,9 @@ from src.models.HyperEvent.hyperevent import HyperEventModel
 from src.models.HyperEvent.data_utils import TemporalEdgeData
 from src.models.HyperEvent.hyperevent_train import (
     AdjacencyTable,
-    compute_batch_relational_vectors,
     build_adj_from_mask,
+    compute_batch_relational_vectors,
+    ensure_non_empty_relational_sequences,
 )
 from src.baselines.evaluation import compute_ranking_metrics
 
@@ -169,6 +170,7 @@ def evaluate_tgb_style(
         def _t(arr, dtype=torch.float32):
             return torch.tensor(arr, dtype=dtype, device=device)
 
+        vecs, masks = ensure_non_empty_relational_sequences(vecs, masks)
         with _amp_autocast(amp_enabled, device.type):
             scores = model(_t(vecs), _t(masks, torch.bool)).cpu().float().numpy()
 

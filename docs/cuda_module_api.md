@@ -15,12 +15,16 @@ cd payment-graph-forecasting
 pip install -e .
 
 # Build C++ and CUDA extensions (requires NVCC)
+# Also requires `ninja` in the active environment for torch extension builds.
 TORCH_CUDA_ARCH_LIST="7.0"  # V100
 # TORCH_CUDA_ARCH_LIST="8.6"  # A10/A100
-python src/models/build_ext.py --all --graph-metrics --graph-metrics-cuda
+python -m payment_graph_forecasting.infra.extensions --all --graph-metrics --graph-metrics-cuda
 ```
 
 Verified on: Python 3.12, PyTorch 2.5.1+cu121, CUDA 12.8, V100 / A10.
+
+`src/models/build_ext.py` still works as a compatibility shim, but the
+package-facing build CLI above is the canonical entrypoint.
 
 ---
 

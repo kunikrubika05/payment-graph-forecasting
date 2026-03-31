@@ -39,6 +39,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from payment_graph_forecasting.training.amp import create_grad_scaler, seed_torch
 from src.models.HyperEvent.hyperevent import HyperEventModel
 from src.models.HyperEvent.data_utils import TemporalEdgeData
 
@@ -306,6 +307,27 @@ def compute_batch_relational_vectors(
     return all_vecs, all_masks
 
 
+def ensure_non_empty_relational_sequences(
+    rel_vecs: np.ndarray,
+    pad_masks: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Ensure every sequence contains at least one unmasked token.
+
+    Tiny validation slices can produce queries with no historical context at all.
+    PyTorch's Transformer nested-tensor path raises when an entire sequence is
+    padding, so we expose a single zero-vector token for those rows and let the
+    classifier fall back to its learned prior for "no context" cases.
+    """
+
+    empty_rows = np.all(pad_masks, axis=1)
+    if not np.any(empty_rows):
+        return rel_vecs, pad_masks
+
+    safe_masks = pad_masks.copy()
+    safe_masks[empty_rows, 0] = False
+    return rel_vecs, safe_masks
+
+
 # ---------------------------------------------------------------------------
 # Training helpers
 # ---------------------------------------------------------------------------
@@ -495,6 +517,7 @@ def validate(
         def _t(arr, dtype=torch.float32):
             return torch.tensor(arr, dtype=dtype, device=device)
 
+        vecs, masks = ensure_non_empty_relational_sequences(vecs, masks)
         with _amp_autocast(amp_enabled, device.type):
             scores = model(_t(vecs), _t(masks, torch.bool)).cpu().float().numpy()
 
@@ -596,9 +619,7 @@ def train_hyperevent(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     rng = np.random.default_rng(seed)
-    torch.manual_seed(seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed(seed)
+    seed_torch(seed, device)
 
     model = HyperEventModel(
         feat_dim=RELATIONAL_DIM,
@@ -619,7 +640,7 @@ def train_hyperevent(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
     amp_enabled = use_amp and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    scaler = create_grad_scaler(enabled=amp_enabled)
 
     train_indices = np.where(train_mask)[0]  # already sorted chronologically
     val_indices = np.where(val_mask)[0]

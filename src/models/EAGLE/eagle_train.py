@@ -25,6 +25,22 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from payment_graph_forecasting.training.amp import autocast_context
+from payment_graph_forecasting.training.amp import (
+    amp_enabled_for_device,
+    create_grad_scaler,
+    seed_torch,
+)
+from payment_graph_forecasting.evaluation.temporal_ranking import (
+    conservative_rank_from_scores,
+    score_candidate_contexts,
+)
+from payment_graph_forecasting.training.epoch import run_loss_epoch
+from payment_graph_forecasting.training.temporal_context import (
+    sample_node_contexts,
+    to_device_tensor,
+)
+from payment_graph_forecasting.training.trainer import run_early_stopping_training
 from src.models.EAGLE.eagle import EAGLETime
 from src.models.EAGLE.data_utils import (
     TemporalEdgeData,
@@ -32,16 +48,8 @@ from src.models.EAGLE.data_utils import (
     build_temporal_csr,
     sample_neighbors_batch,
 )
-from src.models.data_utils import featurize_neighbors
 
 logger = logging.getLogger(__name__)
-
-
-def _amp_autocast(enabled: bool, device_type: str):
-    """Return AMP autocast context or no-op."""
-    if enabled and device_type == "cuda":
-        return torch.cuda.amp.autocast()
-    return contextlib.nullcontext()
 
 
 def prepare_eagle_batch(
@@ -84,28 +92,22 @@ def prepare_eagle_batch(
     num_neg = neg_dst_nodes.shape[1] if neg_dst_nodes.ndim > 1 else 1
 
     def _get_feats(nodes, ts_arr):
-        n_nodes, neighbor_ts, neighbor_eids, lengths = sample_neighbors_batch(
-            csr, nodes, ts_arr, num_neighbors
+        context = sample_node_contexts(
+            csr=csr,
+            data=data,
+            sample_neighbors_fn=sample_neighbors_batch,
+            nodes=nodes,
+            query_timestamps=ts_arr,
+            num_neighbors=num_neighbors,
+            use_edge_feats=use_edge_feats,
+            use_node_feats=use_node_feats,
         )
-        delta_times = np.maximum(
-            ts_arr[:, None] - neighbor_ts, 0.0
-        ).astype(np.float32)
-
-        edge_feat_batch = None
-        node_feat_batch = None
-
-        if use_edge_feats or use_node_feats:
-            _, edge_feat_raw, _ = featurize_neighbors(
-                n_nodes, neighbor_eids, lengths,
-                neighbor_ts, ts_arr,
-                data.node_feats, data.edge_feats,
-            )
-            if use_edge_feats:
-                edge_feat_batch = edge_feat_raw.astype(np.float32)
-            if use_node_feats:
-                node_feat_batch = data.node_feats[nodes].astype(np.float32)
-
-        return delta_times, edge_feat_batch, lengths, node_feat_batch
+        return (
+            context.delta_times,
+            context.edge_features,
+            context.lengths,
+            context.node_features,
+        )
 
     src_dt, src_ef, src_len, src_nf = _get_feats(src_nodes, timestamps)
     dst_dt, dst_ef, dst_len, dst_nf = _get_feats(dst_nodes, timestamps)
@@ -114,35 +116,32 @@ def prepare_eagle_batch(
     neg_ts = np.repeat(timestamps, num_neg)
     neg_dt, neg_ef, neg_len, neg_nf = _get_feats(neg_flat, neg_ts)
 
-    def _t(arr, dtype=torch.float32):
-        return torch.tensor(arr, dtype=dtype, device=device)
-
     batch = {
-        "src_delta_times": _t(src_dt),
-        "src_lengths": _t(src_len, torch.int64),
-        "pos_dst_delta_times": _t(dst_dt),
-        "pos_dst_lengths": _t(dst_len, torch.int64),
-        "neg_dst_delta_times": _t(
-            neg_dt.reshape(batch_size, num_neg, num_neighbors)
+        "src_delta_times": to_device_tensor(src_dt, device),
+        "src_lengths": to_device_tensor(src_len, device, torch.int64),
+        "pos_dst_delta_times": to_device_tensor(dst_dt, device),
+        "pos_dst_lengths": to_device_tensor(dst_len, device, torch.int64),
+        "neg_dst_delta_times": to_device_tensor(
+            neg_dt.reshape(batch_size, num_neg, num_neighbors), device
         ),
-        "neg_dst_lengths": _t(
-            neg_len.reshape(batch_size, num_neg), torch.int64
+        "neg_dst_lengths": to_device_tensor(
+            neg_len.reshape(batch_size, num_neg), device, torch.int64
         ),
     }
 
     if use_edge_feats:
         ef_dim = src_ef.shape[-1]
-        batch["src_edge_feats"] = _t(src_ef)
-        batch["pos_dst_edge_feats"] = _t(dst_ef)
-        batch["neg_dst_edge_feats"] = _t(
-            neg_ef.reshape(batch_size, num_neg, num_neighbors, ef_dim)
+        batch["src_edge_feats"] = to_device_tensor(src_ef, device)
+        batch["pos_dst_edge_feats"] = to_device_tensor(dst_ef, device)
+        batch["neg_dst_edge_feats"] = to_device_tensor(
+            neg_ef.reshape(batch_size, num_neg, num_neighbors, ef_dim), device
         )
 
     if use_node_feats:
-        batch["src_node_feats"] = _t(src_nf)
-        batch["pos_dst_node_feats"] = _t(dst_nf)
-        batch["neg_dst_node_feats"] = _t(
-            neg_nf.reshape(batch_size, num_neg, -1)
+        batch["src_node_feats"] = to_device_tensor(src_nf, device)
+        batch["pos_dst_node_feats"] = to_device_tensor(dst_nf, device)
+        batch["neg_dst_node_feats"] = to_device_tensor(
+            neg_nf.reshape(batch_size, num_neg, -1), device
         )
 
     return batch
@@ -191,24 +190,10 @@ def train_epoch(
     criterion = nn.BCEWithLogitsLoss()
     amp_enabled = use_amp and device.type == "cuda"
 
-    shuffled = rng.permutation(edge_indices)
-    total_loss = 0.0
-    num_batches = 0
-    n_total_batches = (len(shuffled) + batch_size - 1) // batch_size
-
     use_edge_feats = model.edge_feat_dim > 0
     use_node_feats = model.node_feat_dim > 0
 
-    pbar = tqdm(
-        range(0, len(shuffled), batch_size),
-        total=n_total_batches,
-        desc="Training",
-        leave=False,
-        unit="batch",
-    )
-    for start in pbar:
-        end = min(start + batch_size, len(shuffled))
-        batch_idx = shuffled[start:end]
+    def _loss_for_batch(batch_idx: np.ndarray) -> torch.Tensor:
         actual_batch = len(batch_idx)
 
         src = data.src[batch_idx]
@@ -230,7 +215,7 @@ def train_epoch(
             use_node_feats=use_node_feats,
         )
 
-        with _amp_autocast(amp_enabled, device.type):
+        with autocast_context(amp_enabled, device.type):
             pos_logits = model(
                 batch["src_delta_times"],
                 batch["src_lengths"],
@@ -269,26 +254,20 @@ def train_epoch(
                 torch.ones(actual_batch, device=device),
                 torch.zeros(actual_batch * neg_per_positive, device=device),
             ])
-            loss = criterion(all_logits, all_labels)
+            return criterion(all_logits, all_labels)
 
-        optimizer.zero_grad()
-        if amp_enabled and scaler is not None:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-        total_loss += loss.item()
-        num_batches += 1
-        pbar.set_postfix(loss=f"{total_loss / num_batches:.4f}")
-
-    pbar.close()
-    return {"loss": total_loss / max(num_batches, 1)}
+    return run_loss_epoch(
+        edge_indices=edge_indices,
+        batch_size=batch_size,
+        rng=rng,
+        loss_fn=_loss_for_batch,
+        optimizer=optimizer,
+        model=model,
+        amp_enabled=amp_enabled,
+        scaler=scaler,
+        progress_desc="Training",
+        loss_format="{:.4f}",
+    )
 
 
 @torch.no_grad()
@@ -356,59 +335,37 @@ def validate(
 
         src_arr = np.array([src_node], dtype=np.int32)
         ts_arr = np.array([ts], dtype=np.float64)
-        src_nids, src_nts, src_neids, src_lens = sample_neighbors_batch(
-            csr, src_arr, ts_arr, K
+        src_context = sample_node_contexts(
+            csr=csr,
+            data=data,
+            sample_neighbors_fn=sample_neighbors_batch,
+            nodes=src_arr,
+            query_timestamps=ts_arr,
+            num_neighbors=K,
+            use_edge_feats=use_edge_feats,
+            use_node_feats=use_node_feats,
         )
-        src_dt = np.maximum(
-            (ts_arr[:, None] - src_nts), 0.0
-        ).astype(np.float32)
 
         dst_ts_arr = np.full(num_candidates, ts, dtype=np.float64)
-        dst_nids, dst_nts, dst_neids, dst_lens = sample_neighbors_batch(
-            csr, all_dst, dst_ts_arr, K
+        dst_context = sample_node_contexts(
+            csr=csr,
+            data=data,
+            sample_neighbors_fn=sample_neighbors_batch,
+            nodes=all_dst,
+            query_timestamps=dst_ts_arr,
+            num_neighbors=K,
+            use_edge_feats=use_edge_feats,
+            use_node_feats=use_node_feats,
         )
-        dst_dt = np.maximum(
-            (dst_ts_arr[:, None] - dst_nts), 0.0
-        ).astype(np.float32)
 
-        src_ef = dst_ef = src_nf = dst_nf = None
-        if use_edge_feats or use_node_feats:
-            _, src_ef_raw, _ = featurize_neighbors(
-                src_nids, src_neids, src_lens, src_nts, ts_arr,
-                data.node_feats, data.edge_feats,
-            )
-            _, dst_ef_raw, _ = featurize_neighbors(
-                dst_nids, dst_neids, dst_lens, dst_nts, dst_ts_arr,
-                data.node_feats, data.edge_feats,
-            )
-            if use_edge_feats:
-                src_ef = src_ef_raw.astype(np.float32)
-                dst_ef = dst_ef_raw.astype(np.float32)
-            if use_node_feats:
-                src_nf = data.node_feats[[src_node]].astype(np.float32)
-                dst_nf = data.node_feats[all_dst].astype(np.float32)
-
-        def _t(arr, dtype=torch.float32):
-            return torch.tensor(arr, dtype=dtype, device=device)
-
-        with _amp_autocast(amp_enabled, device.type):
-            h_src = model.encode_nodes(
-                _t(src_dt), _t(src_lens, torch.int64),
-                edge_feats=_t(src_ef) if src_ef is not None else None,
-                node_feats=_t(src_nf) if src_nf is not None else None,
-            )
-            h_dst = model.encode_nodes(
-                _t(dst_dt), _t(dst_lens, torch.int64),
-                edge_feats=_t(dst_ef) if dst_ef is not None else None,
-                node_feats=_t(dst_nf) if dst_nf is not None else None,
-            )
-            h_src_exp = h_src.expand(num_candidates, -1)
-            scores = model.edge_predictor(
-                h_src_exp, h_dst
-            ).cpu().float().numpy()
-
-        true_score = scores[0]
-        rank = float(np.sum(scores[1:] > true_score) + 1)
+        scores = score_candidate_contexts(
+            model=model,
+            device=device,
+            src_context=src_context,
+            dst_context=dst_context,
+            amp_enabled=amp_enabled,
+        )
+        rank = conservative_rank_from_scores(scores)
         ranks.append(rank)
 
     ranks = np.array(ranks, dtype=np.float64)
@@ -480,9 +437,7 @@ def train_eagle(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     rng = np.random.default_rng(seed)
-    torch.manual_seed(seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed(seed)
+    seed_torch(seed, device)
 
     train_csr = build_temporal_csr(data, train_mask)
     full_mask = train_mask | val_mask
@@ -512,23 +467,11 @@ def train_eagle(
     optimizer = torch.optim.Adam(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
-    amp_enabled = use_amp and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    amp_enabled = amp_enabled_for_device(use_amp, device)
+    scaler = create_grad_scaler(amp_enabled)
 
     train_indices = np.where(train_mask)[0]
     val_indices = np.where(val_mask)[0]
-
-    history = {
-        "train_loss": [],
-        "val_mrr": [],
-        "val_hits@1": [],
-        "val_hits@3": [],
-        "val_hits@10": [],
-        "epoch_time": [],
-    }
-    best_val_mrr = -1.0
-    best_epoch = -1
-    epochs_without_improvement = 0
 
     config = {
         "model": "EAGLETime",
@@ -562,11 +505,13 @@ def train_eagle(
         len(train_indices),
         len(val_indices),
     )
-
-    for epoch in range(1, num_epochs + 1):
-        epoch_start = time.time()
-
-        train_metrics = train_epoch(
+    history, _summary = run_early_stopping_training(
+        model=model,
+        output_dir=output_dir,
+        device=device,
+        num_epochs=num_epochs,
+        patience=patience,
+        train_epoch_fn=lambda: train_epoch(
             model,
             data,
             train_csr,
@@ -579,9 +524,8 @@ def train_eagle(
             scaler=scaler,
             rng=rng,
             active_nodes=active_nodes,
-        )
-
-        val_metrics = validate(
+        ),
+        validate_fn=lambda: validate(
             model,
             data,
             full_csr,
@@ -592,74 +536,8 @@ def train_eagle(
             use_amp=use_amp,
             rng=rng,
             active_nodes=active_nodes,
-        )
-
-        epoch_time = time.time() - epoch_start
-
-        history["train_loss"].append(train_metrics["loss"])
-        history["val_mrr"].append(val_metrics["mrr"])
-        history["val_hits@1"].append(val_metrics["hits@1"])
-        history["val_hits@3"].append(val_metrics["hits@3"])
-        history["val_hits@10"].append(val_metrics["hits@10"])
-        history["epoch_time"].append(epoch_time)
-
-        logger.info(
-            "Epoch %d/%d [%.1fs] loss=%.4f mrr=%.4f h@1=%.3f h@3=%.3f h@10=%.3f",
-            epoch,
-            num_epochs,
-            epoch_time,
-            train_metrics["loss"],
-            val_metrics["mrr"],
-            val_metrics["hits@1"],
-            val_metrics["hits@3"],
-            val_metrics["hits@10"],
-        )
-
-        if val_metrics["mrr"] > best_val_mrr:
-            best_val_mrr = val_metrics["mrr"]
-            best_epoch = epoch
-            epochs_without_improvement = 0
-            torch.save(
-                model.state_dict(),
-                os.path.join(output_dir, "best_model.pt"),
-            )
-            logger.info("New best model (MRR=%.4f)", best_val_mrr)
-        else:
-            epochs_without_improvement += 1
-
-        with open(os.path.join(output_dir, "metrics.jsonl"), "a") as f:
-            record = {
-                "epoch": epoch,
-                **train_metrics,
-                **{f"val_{k}": v for k, v in val_metrics.items()},
-                "epoch_time": epoch_time,
-            }
-            f.write(json.dumps(record) + "\n")
-
-        if epochs_without_improvement >= patience:
-            logger.info(
-                "Early stopping at epoch %d (patience=%d)", epoch, patience
-            )
-            break
-
-    model.load_state_dict(
-        torch.load(
-            os.path.join(output_dir, "best_model.pt"),
-            map_location=device,
-            weights_only=True,
-        )
-    )
-
-    summary = {
-        "best_epoch": best_epoch,
-        "best_val_mrr": best_val_mrr,
-        "total_epochs": epoch,
-        "final_train_loss": history["train_loss"][-1],
-    }
-    with open(os.path.join(output_dir, "summary.json"), "w") as f:
-        json.dump(summary, f, indent=2)
-
-    logger.info(
-        "Training complete. Best epoch=%d, MRR=%.4f", best_epoch, best_val_mrr
+        ),
+        logger=logger,
+        train_loss_format="%.4f",
     )
     return model, history

@@ -1,0 +1,15 @@
+experiment:
+  name: sg_graphmixer_library_smoke
+  model: sg_graphmixer
+
+data:
+  period: period_10
+  data_dir: /tmp/sg_baselines_data
+
+training:
+  epochs: 5
+  batch_size: 4000
+
+runtime:
+  device: cpu
+  dry_run: true

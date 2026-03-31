@@ -354,6 +354,7 @@ class TestLinkPredictionHelpers:
         assert X.shape[1] == len(NODE_FEATURE_COLUMNS) * 4
 
     def test_hp_search_logreg(self):
+        pytest.importorskip("sklearn")
         from src.baselines.link_prediction import hp_search
 
         rng = np.random.RandomState(42)
@@ -369,6 +370,7 @@ class TestLinkPredictionHelpers:
         assert len(results) > 0
 
     def test_evaluate_ranking(self):
+        pytest.importorskip("sklearn")
         from src.baselines.link_prediction import evaluate_ranking_for_day
 
         from sklearn.linear_model import LogisticRegression

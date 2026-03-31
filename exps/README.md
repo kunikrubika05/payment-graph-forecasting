@@ -3,6 +3,27 @@
 This directory contains all experiments conducted in the project.
 Each experiment lives in its own subdirectory with a standardized structure.
 
+## Examples
+
+Library-facing example YAML specs are stored in `exps/examples/`.
+
+Current examples:
+
+- `graphmixer_library.yaml`
+- `sg_graphmixer_library.yaml`
+- `eagle_library.yaml`
+- `glformer_library.yaml`
+- `hyperevent_library.yaml`
+- `pairwise_mlp_library.yaml`
+
+These files are package-launcher smoke/reference configs rather than historical
+experiment records.
+
+```bash
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher \
+    --config exps/examples/graphmixer_library.yaml --dry-run
+```
+
 ## Naming convention
 
 ```
