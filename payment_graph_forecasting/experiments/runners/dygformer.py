@@ -9,7 +9,6 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 from payment_graph_forecasting.evaluation.api import evaluate_dygformer_model
 from payment_graph_forecasting.experiments.results import (
@@ -97,40 +96,30 @@ def _build_data_summary(data, train_mask, val_mask, test_mask):
 
 
 def _build_eval_infrastructure(
-    parquet_path: str,
-    train_ratio: float,
-    val_ratio: float,
-    *,
-    fraction: float | None = None,
+    data,
+    train_mask,
+    val_mask,
+    test_mask,
 ) -> dict[str, object]:
-    df = pd.read_parquet(parquet_path, columns=["src_idx", "dst_idx", "timestamp"])
-    if fraction is not None and 0.0 < fraction < 1.0:
-        df = df.iloc[: int(len(df) * fraction)]
-    n_total = len(df)
-    train_end = int(n_total * train_ratio)
-    val_end = int(n_total * (train_ratio + val_ratio))
-
-    train_df = df.iloc[:train_end]
-    val_df = df.iloc[train_end:val_end]
-    test_df = df.iloc[val_end:]
-
+    train_src = data.src[train_mask]
+    train_dst = data.dst[train_mask]
     train_neighbors: dict[int, set[int]] = defaultdict(set)
-    for src_node, dst_node in zip(train_df["src_idx"].values, train_df["dst_idx"].values):
+    for src_node, dst_node in zip(train_src, train_dst):
         train_neighbors[int(src_node)].add(int(dst_node))
 
     active_nodes = np.unique(
-        np.concatenate([train_df["src_idx"].values, train_df["dst_idx"].values])
+        np.concatenate([train_src, train_dst])
     ).astype(np.int64)
 
     return {
         "train_neighbors": dict(train_neighbors),
         "active_nodes": active_nodes,
-        "val_src": val_df["src_idx"].values.astype(np.int32),
-        "val_dst": val_df["dst_idx"].values.astype(np.int32),
-        "val_ts": val_df["timestamp"].values.astype(np.float64),
-        "test_src": test_df["src_idx"].values.astype(np.int32),
-        "test_dst": test_df["dst_idx"].values.astype(np.int32),
-        "test_ts": test_df["timestamp"].values.astype(np.float64),
+        "val_src": data.src[val_mask].astype(np.int32, copy=False),
+        "val_dst": data.dst[val_mask].astype(np.int32, copy=False),
+        "val_ts": data.timestamps[val_mask].astype(np.float64, copy=False),
+        "test_src": data.src[test_mask].astype(np.int32, copy=False),
+        "test_dst": data.dst[test_mask].astype(np.int32, copy=False),
+        "test_ts": data.timestamps[test_mask].astype(np.float64, copy=False),
     }
 
 
@@ -212,12 +201,7 @@ def run_dygformer_experiment(args: argparse.Namespace):
         fraction=args.fraction,
         features_path=features_path,
     )
-    eval_infra = _build_eval_infrastructure(
-        parquet_path,
-        args.train_ratio,
-        args.val_ratio,
-        fraction=args.fraction,
-    )
+    eval_infra = _build_eval_infrastructure(data, train_mask, val_mask, test_mask)
     data_time = time.time() - data_start
     save_json(os.path.join(output_dir, "data_summary.json"), _build_data_summary(data, train_mask, val_mask, test_mask))
 

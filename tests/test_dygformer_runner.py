@@ -4,8 +4,10 @@ from argparse import Namespace
 
 import pytest
 import torch
+import numpy as np
 
 from payment_graph_forecasting.experiments.runners.dygformer import (
+    _build_eval_infrastructure,
     build_dygformer_arg_parser,
     run_dygformer_experiment,
 )
@@ -76,6 +78,26 @@ def test_dygformer_runner_dry_run_returns_payload(tmp_path):
     assert result["patch_size"] == 2
     assert result["neg_per_positive"] == 3
     assert result["sampling_backend"] == "cuda"
+
+
+def test_build_eval_infrastructure_uses_dense_ids_from_loaded_data():
+    class DummyData:
+        src = np.array([10, 0, 3, 7], dtype=np.int32)
+        dst = np.array([20, 1, 4, 8], dtype=np.int32)
+        timestamps = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
+
+    train_mask = np.array([True, True, False, False])
+    val_mask = np.array([False, False, True, False])
+    test_mask = np.array([False, False, False, True])
+
+    infra = _build_eval_infrastructure(DummyData, train_mask, val_mask, test_mask)
+
+    assert sorted(infra["train_neighbors"].keys()) == [0, 10]
+    assert np.array_equal(infra["active_nodes"], np.array([0, 1, 10, 20], dtype=np.int64))
+    assert np.array_equal(infra["val_src"], np.array([3], dtype=np.int32))
+    assert np.array_equal(infra["val_dst"], np.array([4], dtype=np.int32))
+    assert np.array_equal(infra["test_src"], np.array([7], dtype=np.int32))
+    assert np.array_equal(infra["test_dst"], np.array([8], dtype=np.int32))
 
 
 def test_dygformer_forward_stays_finite():
