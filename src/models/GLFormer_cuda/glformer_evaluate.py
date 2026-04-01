@@ -16,8 +16,8 @@ from tqdm import tqdm
 from src.models.GLFormer.glformer import GLFormerTime
 from src.models.GLFormer_cuda.data_utils import TemporalEdgeData
 from src.models.GLFormer_cuda.glformer_train import _compute_cooccurrence
+from src.models.stream_graph_data import build_temporal_csr, generate_negatives_for_eval
 from src.models.temporal_graph_sampler import TemporalGraphSampler
-from src.models.EAGLE.data_utils import generate_negatives_for_eval
 from src.baselines.evaluation import compute_ranking_metrics
 
 logger = logging.getLogger(__name__)
@@ -63,8 +63,6 @@ def evaluate_tgb_style(
         Dict with MRR, Hits@1, Hits@3, Hits@10, eval_time_sec,
         edges_per_sec, n_queries.
     """
-    from src.models.EAGLE.data_utils import build_temporal_csr
-
     model.eval()
     rng = np.random.default_rng(seed)
     amp_enabled = use_amp and device.type == "cuda"

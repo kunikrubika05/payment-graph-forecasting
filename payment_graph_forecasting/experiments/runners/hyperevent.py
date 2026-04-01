@@ -23,7 +23,7 @@ from payment_graph_forecasting.experiments.results import (
 from payment_graph_forecasting.evaluation.api import evaluate_hyperevent_model
 from payment_graph_forecasting.infra.datasets import resolve_stream_graph_dataset
 from payment_graph_forecasting.training.api import train_hyperevent_model
-from src.models.HyperEvent.data_utils import load_stream_graph_data
+from src.models.stream_graph_data import load_stream_graph_data
 
 logger = configure_root_logging()
 

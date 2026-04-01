@@ -152,3 +152,14 @@ Useful package-facing CLIs:
 - `python -m payment_graph_forecasting.experiments.hpo`
 - `python -m payment_graph_forecasting.infra.extensions`
 - `docs/design/dev_machine_validation_protocol.md`
+
+Useful package-facing CUDA/runtime APIs:
+
+- `payment_graph_forecasting.TemporalGraphSampler`
+- `payment_graph_forecasting.CommonNeighbors`
+- `payment_graph_forecasting.describe_cuda_capabilities()`
+
+Canonical rule:
+
+- YAML `sampling.backend` is the experiment-spec control surface.
+- Direct Python imports above are the library/runtime control surface.

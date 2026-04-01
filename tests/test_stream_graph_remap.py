@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from src.models.EAGLE.data_utils import temporal_data_to_edge_data
+from src.models.stream_graph_data import temporal_data_to_edge_data
 
 
 class _TemporalDataStub:

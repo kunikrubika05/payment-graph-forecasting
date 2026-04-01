@@ -29,7 +29,7 @@ from payment_graph_forecasting.experiments.results import (
 from payment_graph_forecasting.evaluation.api import evaluate_glformer_model
 from payment_graph_forecasting.infra.datasets import resolve_stream_graph_dataset
 from payment_graph_forecasting.training.api import train_glformer_model
-from src.models.GLFormer.data_utils import TemporalCSR, load_stream_graph_data
+from src.models.stream_graph_data import TemporalCSR, build_temporal_csr, load_stream_graph_data
 
 logger = configure_root_logging()
 
@@ -306,8 +306,6 @@ def run_glformer_experiment(args: argparse.Namespace):
             max_edges=args.max_test_edges if args.max_test_edges else 50_000,
         ).metrics
     else:
-        from src.models.GLFormer.data_utils import build_temporal_csr
-
         train_csr_for_val = build_temporal_csr(data, train_mask)
         val_metrics = evaluate_glformer_model(
             model=model,

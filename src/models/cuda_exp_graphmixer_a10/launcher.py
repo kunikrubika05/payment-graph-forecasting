@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.models.EAGLE.data_utils import load_stream_graph_data
+from src.models.stream_graph_data import load_stream_graph_data
 from src.models.cuda_exp_graphmixer_a10.train import train_graphmixer
 from src.yadisk_utils import upload_directory
 

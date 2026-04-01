@@ -12,7 +12,7 @@ Format of stream graph parquet files:
     usd       — transaction value in USD (float)
 """
 
-from src.models.EAGLE.data_utils import (
+from src.models.stream_graph_data import (
     load_temporal_data,
     temporal_data_to_edge_data,
     load_stream_graph_data,
@@ -22,6 +22,10 @@ from src.models.EAGLE.data_utils import (
     chronological_split,
     sample_neighbors_batch,
 )
+
+# TODO(REFACTORING): keep this model-local compatibility module only until
+# remaining legacy callers import the neutral `src.models.stream_graph_data`
+# bridge directly.
 
 __all__ = [
     "load_temporal_data",

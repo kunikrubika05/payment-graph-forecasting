@@ -36,7 +36,7 @@ try:
 except ImportError:
     raise ImportError("Optuna is required for HPO: pip install optuna")
 
-from src.models.EAGLE.data_utils import load_stream_graph_data
+from src.models.stream_graph_data import load_stream_graph_data
 from src.models.GraphMixer.graphmixer import GraphMixerTime
 from src.models.cuda_exp_graphmixer_a10.train import build_sampler, train_epoch, validate
 
