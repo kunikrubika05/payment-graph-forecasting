@@ -37,6 +37,12 @@ These are the paths and conventions currently used by the team infrastructure.
 
 - env var: `YADISK_TOKEN`
 
+### GPU machine conventions
+
+- the team has used remote GPU machines for heavier training runs
+- package-facing launchers should be preferred over direct `src/*` entrypoints
+- optional C++/CUDA extensions should be built only when the target run needs them
+
 ### Typical local scratch locations
 
 These are conventions, not library requirements:
