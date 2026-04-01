@@ -272,6 +272,8 @@ User-facing wrappers:
     --fraction 0.1
 ```
 
+The repository also includes a visualization module for stream-graph work.
+
 Direct library usage example:
 
 ```python
@@ -318,6 +320,7 @@ src/
 ├── build_pipeline.py    # Main pipeline: download → mapping → snapshots → upload
 ├── build_stream_graph.py # Stream graph pipeline: download → extract → process → upload
 ├── compute_features.py  # Graph-level and node-level feature computation
+├── visualization/       # Legacy/internal visualization utilities
 ├── baselines/           # Legacy baseline pipelines
 └── models/              # Legacy model implementations and migration shims
 docs/

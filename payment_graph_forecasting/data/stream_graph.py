@@ -150,6 +150,38 @@ class StreamGraphDataset:
     def read_table(self, *, columns: list[str] | None = None) -> pa.Table:
         return self._load_table(columns=columns)
 
+    def iter_batches(
+        self,
+        *,
+        columns: list[str] | None = None,
+        batch_size: int | None = None,
+    ):
+        """Yield record batches for the current selection.
+
+        This provides a lightweight streaming path for package-facing analysis
+        and visualization helpers that should avoid materializing large
+        selections in memory.
+        """
+
+        if self.selection.kind == "full":
+            yield from self._parquet_file().iter_batches(columns=columns, batch_size=batch_size)
+            return
+        if self.selection.kind == "period_fraction":
+            yield from self._iter_period_fraction_batches(columns=columns, batch_size=batch_size)
+            return
+        if self.selection.kind == "date_range":
+            dataset = ds.dataset(self.parquet_path, format="parquet")
+            yield from dataset.to_batches(
+                columns=columns,
+                batch_size=batch_size,
+                filter=(
+                    (ds.field("timestamp") >= _date_to_unix_start(str(self.selection.start_date)))
+                    & (ds.field("timestamp") <= _date_to_unix_end(str(self.selection.end_date)))
+                ),
+            )
+            return
+        raise ValueError(f"Unsupported selection kind: {self.selection.kind}")
+
     def write_parquet(self, output_path: str | Path) -> str:
         table = self._load_table(columns=list(STREAM_GRAPH_COLUMNS))
         destination = Path(output_path)
@@ -218,6 +250,27 @@ class StreamGraphDataset:
                 schema = pa.schema([schema.field(name) for name in columns])
             return pa.Table.from_batches([], schema=schema)
         return pa.Table.from_batches(batches)
+
+    def _iter_period_fraction_batches(
+        self,
+        *,
+        columns: list[str] | None = None,
+        batch_size: int | None = None,
+    ):
+        total_rows = self._source_total_edges()
+        remaining = int(total_rows * float(self.selection.fraction))
+        if remaining <= 0:
+            return
+
+        parquet_file = self._parquet_file()
+        for batch in parquet_file.iter_batches(columns=columns, batch_size=batch_size):
+            if remaining <= 0:
+                break
+            if batch.num_rows > remaining:
+                yield batch.slice(0, remaining)
+                break
+            yield batch
+            remaining -= batch.num_rows
 
 
 def open_stream_graph(
