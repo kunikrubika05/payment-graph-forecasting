@@ -1,41 +1,24 @@
 # GPU Primitives for Temporal Graph Learning
 
-This module provides CUDA-accelerated primitives for training and inference
-on temporal transaction graphs. Each primitive supports three backends
-(Python, C++, CUDA) with a unified API and automatic backend selection.
+Maintained package-facing CUDA/runtime surface:
 
----
+- experiment control: YAML `sampling.backend`
+- library/runtime control:
+  - `payment_graph_forecasting.TemporalGraphSampler`
+  - `payment_graph_forecasting.CommonNeighbors`
+  - `payment_graph_forecasting.describe_cuda_capabilities()`
 
-## Installation
+## Verified Entry Points
 
 ```bash
-# Clone the repository
-git clone https://github.com/kunikrubika05/payment-graph-forecasting.git
-cd payment-graph-forecasting
-pip install -e .
-
-# Build C++ and CUDA extensions (requires NVCC)
-# Also requires `ninja` in the active environment for torch extension builds.
-TORCH_CUDA_ARCH_LIST="7.0"  # V100
-# TORCH_CUDA_ARCH_LIST="8.6"  # A10/A100
-python -m payment_graph_forecasting.infra.extensions --all --graph-metrics --graph-metrics-cuda
+./venv/bin/python -m payment_graph_forecasting.infra.extensions --help
+./venv/bin/python -m payment_graph_forecasting.experiments.launcher --help
+./venv/bin/python -m payment_graph_forecasting.experiments.hpo --help
 ```
 
-Verified on: Python 3.12, PyTorch 2.5.1+cu121, CUDA 12.8, V100 / A10.
+## Experiment Contract
 
-`src/models/build_ext.py` still works as a compatibility shim, but the
-package-facing build CLI above is the canonical entrypoint.
-
-For package-facing experiments, the CUDA backend is enabled by config, not by
-importing a separate runner. The stable public surface is split into two
-contracts:
-
-- experiment contract: YAML `sampling.backend`
-- library contract: `payment_graph_forecasting.TemporalGraphSampler`,
-  `payment_graph_forecasting.CommonNeighbors`,
-  `payment_graph_forecasting.describe_cuda_capabilities()`
-
-The experiment contract is:
+Use CUDA through YAML:
 
 ```yaml
 experiment:
@@ -45,13 +28,9 @@ sampling:
   backend: cuda
 ```
 
-and launched through:
+Run the spec through the package launcher.
 
-```bash
-python -m payment_graph_forecasting.experiments.launcher --config spec.yaml
-```
-
-The direct library/runtime contract is:
+## Library Contract
 
 ```python
 import payment_graph_forecasting as pgf
@@ -61,200 +40,31 @@ sampler_cls = pgf.TemporalGraphSampler
 graph_metric_cls = pgf.CommonNeighbors
 ```
 
----
+## Primitive Summary
 
-## Primitive 1: Temporal Neighbor Sampling
+### Temporal Neighbor Sampling
 
-Retrieves the K most recent neighbors of a node at a given timestamp.
-Required for training GraphMixer, DyGFormer, TGN, and similar models.
+`TemporalGraphSampler` provides a unified interface over Python, C++, and CUDA
+backends for temporal neighbor lookup and feature gathering.
 
-### Quick start
+Backend rule of thumb:
 
-```python
-from payment_graph_forecasting import TemporalGraphSampler, describe_cuda_capabilities
-import numpy as np
+- `python`: fallback, always available
+- `cpp`: strong default for CPU runs and sparse graphs
+- `cuda`: best fit for large batches and large neighbor counts
 
-caps = describe_cuda_capabilities()
+### Common Neighbors
 
-# Build sampler from event stream (sorted by timestamp)
-# src, dst: [E] int64 — edge endpoints
-# ts:       [E] float64 — edge timestamps (ascending)
-sampler = TemporalGraphSampler(
-    num_nodes=num_nodes,
-    src=src, dst=dst, timestamps=ts,
-    edge_ids=edge_ids,
-    node_feats=node_feats,
-    edge_feats=edge_feats,
-    backend="auto",  # cuda > cpp > python
-)
+`CommonNeighbors` provides exact common-neighbor counts with the same backend
+selection pattern.
 
-# Sample K=20 most recent neighbors for a batch of queries
-neighbors = sampler.sample_neighbors(
-    np.array([0, 1, 2], dtype=np.int32),       # [B] query nodes
-    np.array([1000, 2000, 3000], dtype=np.float64),  # [B] query timestamps
-    num_neighbors=20,
-)
-# neighbors.neighbor_ids: [B, K] int32/torch tensor — neighbor indices (-1 = padding)
-# neighbors.edge_ids:   [B, K] int64 — edge indices
-# neighbors.timestamps: [B, K] float64 — edge timestamps
-# neighbors.lengths:    [B] int32 — number of valid neighbors per query
+Backend rule of thumb:
 
-# Gather features for sampled neighbors
-features = sampler.featurize(neighbors, np.array([1000, 2000, 3000], dtype=np.float64))
-# features.node_features: [B, K, F_n] float32
-# features.edge_features: [B, K, F_e] float32
-# features.rel_timestamps:[B, K] float64 — time elapsed since query
-```
+- sparse graphs: C++ is usually the best backend
+- denser graphs: CUDA can win clearly
 
-### Backend selection
+## Related Docs
 
-```python
-sampler = TemporalGraphSampler(..., backend="auto")    # recommended
-sampler = TemporalGraphSampler(..., backend="cuda")    # GPU, fastest for K>=100
-sampler = TemporalGraphSampler(..., backend="cpp")     # CPU C++, sparse graphs
-sampler = TemporalGraphSampler(..., backend="python")  # always available
-```
-
-### Performance (V100, synthetic graph)
-
-| Setting | Python | C++ | CUDA | CUDA speedup |
-|---------|--------|-----|------|--------------|
-| batch=512, K=20 (GraphMixer) | 7.55ms | 0.21ms | 0.15ms | **50×** |
-| batch=512, K=512 (DyGFormer small) | 11.49ms | 4.04ms | 0.18ms | **64×** |
-| batch=2048, K=512 (DyGFormer) | 62.33ms | 34.22ms | 0.34ms | **184×** |
-| batch=512, K=512, 5M nodes | 8.64ms | 2.61ms | 0.18ms | **49×** |
-
-The C++ backend uses binary search on a timestamp-sorted CSR structure.
-The CUDA backend parallelises search and featurization across the entire
-batch, achieving near-linear scaling with batch size and K.
-
-**When to use CUDA:** K ≥ 100 or batch_size ≥ 1024. For K=20 (GraphMixer),
-C++ is already fast enough — CUDA provides a modest additional gain.
-
-### DyGFormer integration in the framework
-
-DyGFormer now uses the same package-facing API as the other integrated models.
-
-Relevant files:
-
-- [payment_graph_forecasting/models/dygformer.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/payment_graph_forecasting/models/dygformer.py)
-- [payment_graph_forecasting/training/api.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/payment_graph_forecasting/training/api.py)
-- [payment_graph_forecasting/experiments/runners/dygformer.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/payment_graph_forecasting/experiments/runners/dygformer.py)
-- [src/models/DyGFormer/dygformer_cuda_train.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/src/models/DyGFormer/dygformer_cuda_train.py)
-
-Dispatch rule:
-
-- `sampling.backend: auto` -> legacy CPU/C++-compatible path
-- `sampling.backend: cuda` -> `train_dygformer_cuda(...)`
-
-The model itself remains standard PyTorch DyGFormer. The optimisation is in
-the training pipeline around temporal sampling and batch preparation.
-
-### Real V100 results for the integrated DyGFormer path
-
-Measured on ORBITAAL stream-graph, summer 2020, 10% sample:
-
-| Config | Epoch estimate |
-|---|---|
-| old package path, `batch_size=1536`, `num_neighbors=32` | `~47.9 min` |
-| CUDA path, `batch_size=1536`, `num_neighbors=32` | `~27.1 min` |
-| CUDA path, `batch_size=3072`, `num_neighbors=32` | `~26.6 min` |
-| CUDA path, `batch_size=3072`, `num_neighbors=24` | `~19.7 min` |
-
-Recommended default for full training:
-
-```yaml
-sampling:
-  backend: cuda
-  num_neighbors: 32
-
-training:
-  batch_size: 3072
-```
-
-`num_neighbors: 24` is the speed-oriented alternative. It is faster, but it is
-not the safest default for quality-sensitive long runs.
-
----
-
-## Primitive 2: Common Neighbors
-
-Computes the exact intersection size |N(u) ∩ N(v)| for a batch of node
-pairs. Strongest structural heuristic for link prediction. Can be used
-as a real-time feature inside neural network scoring functions.
-
-### Quick start
-
-```python
-from payment_graph_forecasting import CommonNeighbors
-from scipy import sparse
-import numpy as np
-
-# Load a static undirected binary adjacency (scipy CSR)
-adj = sparse.load_npz("adj_undirected.npz")   # symmetric, sorted indices
-
-cn = CommonNeighbors(adj, backend="auto")  # cuda > cpp > python
-
-# Compute CN for a batch of pairs
-src = np.array([0, 1, 100], dtype=np.int64)
-dst = np.array([3, 4, 200], dtype=np.int64)
-counts = cn.compute(src, dst)
-# counts: [3] int32 — exact |N(src[i]) ∩ N(dst[i])|
-```
-
-### Using CN as a neural network feature
-
-```python
-# Example: BUDDY-style scoring with exact CN instead of MinHash approximation
-cn_vals = cn.compute(src_batch, dst_batch)        # [B] int32, exact
-cn_feat = np.log1p(cn_vals).astype(np.float32)   # log-normalise
-# Concatenate with learned node embeddings and pass to MLP scorer
-score = mlp(np.stack([h_src, h_dst, cn_feat], axis=-1))
-```
-
-### Performance (V100, synthetic graph)
-
-| Graph regime | Python | C++ | CUDA | Best backend |
-|---|---|---|---|---|
-| Sparse, avg_deg=6 (Bitcoin) | 0.42ms | **0.07ms** | 1.18ms | **C++** |
-| Transition, avg_deg=50 | 1.27ms | **0.57ms** | 0.73ms | **C++** |
-| Dense, avg_deg=200 | 2.00ms | 1.02ms | **0.42ms** | **CUDA** |
-| Dense, avg_deg=500 | 8.51ms | 5.05ms | **0.71ms** | **CUDA** |
-| Dense, avg_deg=1000 | 35.79ms | 20.85ms | **1.66ms** | **CUDA** |
-
-Batch size = 512–2048 pairs. N = 50K–500K nodes.
-
-**When to use CUDA:** avg_deg ≥ 100–150. On sparse real-world graphs
-(social, citation, e-commerce at density < 50), the C++ backend is faster
-due to GPU kernel launch overhead exceeding the actual computation.
-
-**Why not approximation?** BUDDY (Chamberlain et al., ICLR 2023) approximates
-CN via MinHash to avoid the computational cost of exact computation. Our
-CUDA implementation makes exact CN practical for dense graphs, eliminating
-the approximation error entirely.
-
----
-
-## Running benchmarks
-
-```bash
-# Temporal sampling (5 scenarios)
-PYTHONPATH=. python scripts/bench_sampling.py --cuda 2>&1 | tee /tmp/bench_sampling.log
-
-# Common neighbors (5 scenarios)
-PYTHONPATH=. python scripts/bench_cn.py --cuda 2>&1 | tee /tmp/bench_cn.log
-```
-
----
-
-## Running tests
-
-```bash
-# 30 tests: Python / C++ / CUDA backend equivalence for temporal sampling
-PYTHONPATH=. python -m pytest tests/test_temporal_sampler.py -v
-
-# 16 tests: Python / C++ / CUDA correctness for common neighbors
-PYTHONPATH=. python -m pytest tests/test_graph_metrics.py -v
-```
-
-All 46 tests pass on V100 with the compiled CUDA extensions.
+- [cuda_module_overview.md](cuda_module_overview.md)
+- [cuda_temporal_sampling.md](cuda_temporal_sampling.md)
+- [cuda_common_neighbors.md](cuda_common_neighbors.md)

@@ -4,10 +4,6 @@ This file preserves the historical entrypoint while delegating to the new
 package runner.
 """
 
-# TODO(REFACTORING): remove legacy src.models.sg_graphmixer.launcher wrapper
-# after callers migrate to
-# payment_graph_forecasting.experiments.runners.sg_graphmixer.
-
 from payment_graph_forecasting.experiments.runners.sg_graphmixer import (
     build_sg_graphmixer_arg_parser,
     main,

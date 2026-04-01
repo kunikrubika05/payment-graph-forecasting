@@ -4,10 +4,6 @@ This file preserves the historical entrypoint while delegating to the new
 package runner.
 """
 
-# TODO(REFACTORING): remove legacy src.models.HyperEvent.hyperevent_launcher
-# wrapper after callers migrate to
-# payment_graph_forecasting.experiments.runners.hyperevent.
-
 from payment_graph_forecasting.experiments.runners.hyperevent import (
     build_hyperevent_arg_parser,
     main,

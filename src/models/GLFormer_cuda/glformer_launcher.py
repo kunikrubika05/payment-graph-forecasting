@@ -4,11 +4,6 @@ This file preserves the historical entrypoint while delegating to the unified
 package GLFormer runner, which now models sampler backend selection directly.
 """
 
-# TODO(REFACTORING): remove legacy src.models.GLFormer_cuda.glformer_launcher
-# wrapper after callers migrate to
-# payment_graph_forecasting.experiments.runners.glformer with
-# `--sampling-backend`.
-
 from payment_graph_forecasting.experiments.runners.glformer import (
     build_glformer_arg_parser,
     main,

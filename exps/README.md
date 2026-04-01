@@ -1,7 +1,6 @@
 # Experiments
 
-This directory contains all experiments conducted in the project.
-Each experiment lives in its own subdirectory with a standardized structure.
+This directory contains reference YAML specs and experiment notes.
 
 ## Examples
 
@@ -10,6 +9,7 @@ Library-facing example YAML specs are stored in `exps/examples/`.
 Current examples:
 
 - `graphmixer_library.yaml`
+- `dygformer_library.yaml`
 - `sg_graphmixer_library.yaml`
 - `eagle_library.yaml`
 - `glformer_library.yaml`
@@ -24,7 +24,12 @@ experiment records.
     --config exps/examples/graphmixer_library.yaml --dry-run
 ```
 
-## Naming convention
+## Experiment Notes
+
+Historical experiment notes may live in `exp_NNN_*` directories. The maintained
+launcher surface is still the package-facing YAML path.
+
+## Naming Convention
 
 ```
 exp_NNN_<brief_description>/

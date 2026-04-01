@@ -4,8 +4,6 @@ This file preserves the historical entrypoint while delegating to the new
 package runner.
 """
 
-# TODO(REFACTORING): remove legacy src.models.EAGLE.eagle_launcher wrapper after callers migrate to payment_graph_forecasting.experiments.runners.eagle.
-
 from payment_graph_forecasting.experiments.runners.eagle import (
     build_eagle_arg_parser,
     main,

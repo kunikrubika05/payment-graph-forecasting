@@ -15,11 +15,6 @@ from src.models.EAGLE.data_utils import (
     sample_neighbors_batch,
     temporal_data_to_edge_data,
 )
-
-# TODO(REFACTORING): move the underlying implementation out of
-# `src.models.EAGLE.data_utils` once the shared stream-graph data layer no
-# longer lives behind the legacy EAGLE module.
-
 __all__ = [
     "load_temporal_data",
     "temporal_data_to_edge_data",

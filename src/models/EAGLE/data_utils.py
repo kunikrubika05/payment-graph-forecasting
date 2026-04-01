@@ -26,7 +26,6 @@ import torch
 try:
     from torch_geometric.data import TemporalData
 except ModuleNotFoundError:
-    # TODO(REFACTORING): drop this lightweight TemporalData fallback once the new data layer no longer imports torch_geometric on lightweight code paths.
     class TemporalData:  # type: ignore[override]
         """Small fallback used when torch_geometric is unavailable.
 
