@@ -272,8 +272,6 @@ def run_glformer_experiment(args: argparse.Namespace):
 
     eval_start = time.time()
     if use_sampler_backend:
-        # TODO(REFACTORING): route sampling_backend="auto" through this unified
-        # sampler path once parity with the legacy TemporalCSR evaluation flow is verified.
         from src.models.GLFormer_cuda.data_utils import build_cuda_sampler
 
         train_sampler_for_val = build_cuda_sampler(data, train_mask, backend=sampling_backend)

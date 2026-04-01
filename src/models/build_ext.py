@@ -23,9 +23,6 @@ from payment_graph_forecasting.infra.extensions import (
     build_temporal_sampling_cuda,
     main,
 )
-
-# TODO(REFACTORING): remove this shim after callers migrate to
-# `python -m payment_graph_forecasting.infra.extensions`.
 build_cpp = build_temporal_sampling_cpp
 build_cuda = build_temporal_sampling_cuda
 

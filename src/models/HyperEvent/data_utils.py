@@ -25,11 +25,6 @@ from src.models.stream_graph_data import (
     generate_negatives_for_eval,
     sample_neighbors_batch,
 )
-
-# TODO(REFACTORING): keep this model-local compatibility module only until
-# remaining legacy callers import the neutral `src.models.stream_graph_data`
-# bridge directly.
-
 __all__ = [
     "load_temporal_data",
     "temporal_data_to_edge_data",

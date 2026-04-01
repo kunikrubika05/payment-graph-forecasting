@@ -65,7 +65,6 @@ def _build_python_cpp_fallback():
     compiled extension is unavailable.
     """
 
-    # TODO(REFACTORING): remove the pseudo-extension once all sampling paths use the unified backend abstraction directly.
     class _TemporalCSRCompat:
         def __init__(self, num_nodes, src, dst, timestamps, edge_ids):
             sort_idx = np.lexsort((timestamps, src))

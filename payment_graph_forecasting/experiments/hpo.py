@@ -69,8 +69,6 @@ def run_hpo(model_name: str, argv: list[str] | None = None) -> int:
     if argv:
         cli_argv.extend(argv)
     with _patched_argv(cli_argv):
-        # TODO(REFACTORING): replace legacy HPO mains with package-native HPO
-        # entrypoints once Optuna orchestration is migrated out of src.models.*.
         entrypoint()
     return 0
 

@@ -33,7 +33,4 @@ def build_cuda_sampler(data: TemporalEdgeData, mask=None,
     Legacy GLFormer CUDA bridge over the shared sampler builder.
     """
 
-    # TODO(REFACTORING): remove this GLFormer-specific CUDA data bridge once
-    # remaining callers use `src.models.data_utils.build_unified_sampler`
-    # or the package-facing sampling wrappers directly.
     return build_unified_sampler(data, mask=mask, backend=backend)

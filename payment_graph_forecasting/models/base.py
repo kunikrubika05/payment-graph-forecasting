@@ -117,8 +117,6 @@ class BaseRunnerAdapter(BaseModelAdapter):
         )
 
     def execute_plan(self, plan: ModelExecutionPlan) -> LaunchResult:
-        # TODO(REFACTORING): remove the argparse bridge once all models execute from
-        # the library-level execution plan directly instead of legacy runner CLIs.
         args = plan.as_namespace()
         result = self.run_runner(args)
         return LaunchResult(

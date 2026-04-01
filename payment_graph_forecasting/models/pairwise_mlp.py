@@ -33,7 +33,6 @@ class PairwiseMLPAdapter(BaseRunnerAdapter):
         }
 
     def run_runner(self, args):
-        # TODO(REFACTORING): replace PairwiseMLP's legacy core pipeline with the unified trainer/evaluator stack.
         from payment_graph_forecasting.experiments.runners.pairwise_mlp import run_pairwise_mlp_experiment
 
         return run_pairwise_mlp_experiment(args)
