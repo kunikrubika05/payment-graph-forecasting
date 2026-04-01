@@ -9,6 +9,11 @@ historical tooling. It is not the primary user-facing API.
 
 Full documentation lives in [docs/README.md](docs/README.md).
 
+There is also an assistant prompt for AI coding agents that can guide a user
+through setup, data work, model selection, experiment launch, debugging, and
+library-style extensions:
+[docs/library_assistant_prompt.md](docs/library_assistant_prompt.md).
+
 ## Installation
 
 Use the project virtual environment:
@@ -30,6 +35,8 @@ Top-level entrypoints:
 - `payment_graph_forecasting.describe_cuda_capabilities`
 - `payment_graph_forecasting.TemporalGraphSampler`
 - `payment_graph_forecasting.CommonNeighbors`
+- `payment_graph_forecasting.open_stream_graph`
+- `payment_graph_forecasting.analyze_stream_graph`
 
 Main package areas:
 
@@ -38,6 +45,10 @@ Main package areas:
 - `payment_graph_forecasting.training`
 - `payment_graph_forecasting.evaluation`
 - `payment_graph_forecasting.analysis`
+- `payment_graph_forecasting.data`
+- `payment_graph_forecasting.sampling`
+- `payment_graph_forecasting.cuda`
+- `payment_graph_forecasting.graph_metrics`
 - `payment_graph_forecasting.experiments`
 - `payment_graph_forecasting.infra`
 
@@ -77,6 +88,54 @@ from payment_graph_forecasting import load_experiment_spec, launch_experiment
 spec = load_experiment_spec("exps/examples/graphmixer_library.yaml")
 result = launch_experiment(spec)
 ```
+
+## Package Areas
+
+### `payment_graph_forecasting.config`
+
+Typed experiment configuration and YAML loading.
+
+### `payment_graph_forecasting.models`
+
+Canonical model exports, adapters, and model registry helpers.
+
+### `payment_graph_forecasting.training`
+
+Library-facing training wrappers for integrated model paths.
+
+### `payment_graph_forecasting.evaluation`
+
+Library-facing evaluation wrappers and ranking helpers.
+
+### `payment_graph_forecasting.analysis`
+
+Lightweight stream-graph analysis helpers, including
+`analyze_stream_graph`.
+
+### `payment_graph_forecasting.data`
+
+Stream-graph dataset descriptors, slicing helpers, and `open_stream_graph`.
+
+### `payment_graph_forecasting.sampling`
+
+Negative sampling strategy objects, backend resolution, and
+`TemporalGraphSampler`.
+
+### `payment_graph_forecasting.cuda`
+
+Capability discovery for optional C++/CUDA acceleration.
+
+### `payment_graph_forecasting.graph_metrics`
+
+Runtime graph-metric wrappers such as `CommonNeighbors`.
+
+### `payment_graph_forecasting.experiments`
+
+Unified launch and HPO entrypoints.
+
+### `payment_graph_forecasting.infra`
+
+Runtime, dataset-resolution, data-access, and optional extension-build helpers.
 
 ## Runtime And Extensions
 
