@@ -229,8 +229,15 @@ Optional compiled extensions now also have a package-facing entrypoint:
 ./venv/bin/python -m payment_graph_forecasting.infra.extensions --all --graph-metrics
 ```
 
+When the extensions were already built earlier, package-facing and legacy-backed
+paths now reuse the prebuilt binaries instead of requiring a fresh JIT compile.
+
 Legacy `python src/models/build_ext.py ...` remains available as a compatibility
 shim while the refactor is being finalized.
+
+For small package-facing stream-graph smokes, `data.fraction` is the canonical
+way to cut down parquet-backed runs. This now applies consistently to
+`eagle`, `dygformer`, and `hyperevent`.
 
 Direct library usage example:
 

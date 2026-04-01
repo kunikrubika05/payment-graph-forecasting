@@ -157,6 +157,10 @@ export YADISK_TOKEN="<токен Яндекс.Диска>"
 `src/models/build_ext.py` сохранён как compatibility shim для старых инструкций
 и исторических запусков.
 
+Если расширение уже было собрано ранее, package-facing и legacy-backed runtime
+path теперь используют prebuilt binary из локального build-кэша. `ninja`
+нужен именно для пересборки, а не для каждого последующего запуска.
+
 ### Получение YADISK_TOKEN
 
 1. Перейди на https://oauth.yandex.ru

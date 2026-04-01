@@ -146,13 +146,16 @@ def test_glformer_adapter_uses_shared_defaults_and_experiment_name():
 
 
 def test_hyperevent_adapter_uses_shared_defaults():
-    payload = HyperEventAdapter().build_runner_kwargs(_make_spec("hyperevent"))
+    spec = _make_spec("hyperevent")
+    spec.data.fraction = 0.1
+    payload = HyperEventAdapter().build_runner_kwargs(spec)
 
     assert payload["output"] == "/tmp/hyperevent_results"
     assert payload["device"] == "auto"
     assert payload["data_source"] == "orbitaal_stream_graph"
     assert payload["parquet_path"] == "/tmp/data.parquet"
     assert payload["parquet_remote_path"] == "remote/data.parquet"
+    assert payload["fraction"] == 0.1
     assert payload["n_neighbor"] == 17
     assert payload["n_latest"] == 10
 

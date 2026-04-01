@@ -49,6 +49,7 @@ def build_hyperevent_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--raw-remote-path", type=str, default=None)
     parser.add_argument("--parquet-path", type=str, default=None)
     parser.add_argument("--parquet-remote-path", type=str, default=None)
+    parser.add_argument("--fraction", type=float, default=None)
     parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--val-ratio", type=float, default=0.15)
     parser.add_argument("--output", type=str, default="/tmp/hyperevent_results")
@@ -103,6 +104,7 @@ def run_hyperevent_experiment(args: argparse.Namespace):
             data_extra=getattr(args, "data_extra", {}),
             parquet_path=args.parquet_path,
             parquet_remote_path=args.parquet_remote_path,
+            fraction=getattr(args, "fraction", None),
             device=getattr(args, "device", "auto"),
             upload=bool(getattr(args, "upload", False)),
             remote_dir=getattr(args, "remote_dir", None),
@@ -148,6 +150,7 @@ def run_hyperevent_experiment(args: argparse.Namespace):
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         undirected=True,
+        fraction=args.fraction,
     )
     data_time = time.time() - data_start
     save_json(os.path.join(output_dir, "data_summary.json"), _build_data_summary(data, train_mask, val_mask, test_mask))
@@ -216,6 +219,7 @@ def run_hyperevent_experiment(args: argparse.Namespace):
         },
         extra={
             "parquet_path": parquet_path,
+            "fraction": args.fraction,
             "test_metrics": test_metrics,
         },
     )
