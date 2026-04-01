@@ -159,6 +159,13 @@ sampling:
 python -m payment_graph_forecasting.experiments.launcher --config /path/to/spec.yaml
 ```
 
+Это не единственный public surface. Для прямого library usage каноническими
+считаются также:
+
+- `payment_graph_forecasting.TemporalGraphSampler`
+- `payment_graph_forecasting.CommonNeighbors`
+- `payment_graph_forecasting.describe_cuda_capabilities()`
+
 Внутри это работает так:
 
 - [payment_graph_forecasting/models/dygformer.py](/Users/kunikrubika/Desktop/payment-graph-forecasting/payment_graph_forecasting/models/dygformer.py) прокидывает `sampling.backend` в runner

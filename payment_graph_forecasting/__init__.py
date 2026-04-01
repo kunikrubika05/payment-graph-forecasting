@@ -6,8 +6,11 @@ available through compatibility adapters during the migration.
 
 from payment_graph_forecasting.config.base import ExperimentSpec
 from payment_graph_forecasting.config.yaml_io import load_experiment_spec
+from payment_graph_forecasting.cuda import CudaCapabilities, describe_cuda_capabilities
+from payment_graph_forecasting.graph_metrics import CommonNeighbors
 from payment_graph_forecasting.models.base import ModelExecutionPlan
 from payment_graph_forecasting.models.registry import MODEL_REGISTRY, get_model_adapter
+from payment_graph_forecasting.sampling.temporal import TemporalGraphSampler
 
 
 def build_execution_plan(spec: ExperimentSpec) -> ModelExecutionPlan:
@@ -30,8 +33,12 @@ __all__ = [
     "ModelExecutionPlan",
     "ExperimentSpec",
     "MODEL_REGISTRY",
+    "CommonNeighbors",
+    "CudaCapabilities",
     "build_execution_plan",
+    "describe_cuda_capabilities",
     "get_model_adapter",
     "launch_experiment",
     "load_experiment_spec",
+    "TemporalGraphSampler",
 ]

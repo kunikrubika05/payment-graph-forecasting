@@ -14,7 +14,7 @@ HyperEvent does not use edge or node feature vectors during training.
 The relational structural encoding is computed from adjacency table structure only.
 """
 
-from src.models.EAGLE.data_utils import (
+from src.models.stream_graph_data import (
     load_temporal_data,
     temporal_data_to_edge_data,
     load_stream_graph_data,
@@ -25,6 +25,10 @@ from src.models.EAGLE.data_utils import (
     generate_negatives_for_eval,
     sample_neighbors_batch,
 )
+
+# TODO(REFACTORING): keep this model-local compatibility module only until
+# remaining legacy callers import the neutral `src.models.stream_graph_data`
+# bridge directly.
 
 __all__ = [
     "load_temporal_data",

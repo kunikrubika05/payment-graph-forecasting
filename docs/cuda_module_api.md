@@ -27,7 +27,15 @@ Verified on: Python 3.12, PyTorch 2.5.1+cu121, CUDA 12.8, V100 / A10.
 package-facing build CLI above is the canonical entrypoint.
 
 For package-facing experiments, the CUDA backend is enabled by config, not by
-importing a separate runner. The stable public surface is:
+importing a separate runner. The stable public surface is split into two
+contracts:
+
+- experiment contract: YAML `sampling.backend`
+- library contract: `payment_graph_forecasting.TemporalGraphSampler`,
+  `payment_graph_forecasting.CommonNeighbors`,
+  `payment_graph_forecasting.describe_cuda_capabilities()`
+
+The experiment contract is:
 
 ```yaml
 experiment:
@@ -43,6 +51,16 @@ and launched through:
 python -m payment_graph_forecasting.experiments.launcher --config spec.yaml
 ```
 
+The direct library/runtime contract is:
+
+```python
+import payment_graph_forecasting as pgf
+
+caps = pgf.describe_cuda_capabilities()
+sampler_cls = pgf.TemporalGraphSampler
+graph_metric_cls = pgf.CommonNeighbors
+```
+
 ---
 
 ## Primitive 1: Temporal Neighbor Sampling
@@ -53,56 +71,48 @@ Required for training GraphMixer, DyGFormer, TGN, and similar models.
 ### Quick start
 
 ```python
-from src.models.temporal_graph_sampler import TemporalGraphSampler, Backend
+from payment_graph_forecasting import TemporalGraphSampler, describe_cuda_capabilities
 import numpy as np
+
+caps = describe_cuda_capabilities()
 
 # Build sampler from event stream (sorted by timestamp)
 # src, dst: [E] int64 — edge endpoints
 # ts:       [E] float64 — edge timestamps (ascending)
-# node_feat:[N, F_n] float32 — static node features
-# edge_feat:[E, F_e] float32 — edge features
 sampler = TemporalGraphSampler(
+    num_nodes=num_nodes,
     src=src, dst=dst, timestamps=ts,
-    node_feat=node_feat, edge_feat=edge_feat,
-    backend=Backend.AUTO,  # cuda > cpp > python
+    edge_ids=edge_ids,
+    node_feats=node_feats,
+    edge_feats=edge_feats,
+    backend="auto",  # cuda > cpp > python
 )
 
 # Sample K=20 most recent neighbors for a batch of queries
 neighbors = sampler.sample_neighbors(
-    nodes=np.array([0, 1, 2]),      # [B] query nodes
-    times=np.array([1000, 2000, 3000]),  # [B] query timestamps
-    K=20,
+    np.array([0, 1, 2], dtype=np.int32),       # [B] query nodes
+    np.array([1000, 2000, 3000], dtype=np.float64),  # [B] query timestamps
+    num_neighbors=20,
 )
-# neighbors.node_ids:   [B, K] int64 — neighbor node indices (-1 = padding)
+# neighbors.neighbor_ids: [B, K] int32/torch tensor — neighbor indices (-1 = padding)
 # neighbors.edge_ids:   [B, K] int64 — edge indices
 # neighbors.timestamps: [B, K] float64 — edge timestamps
-# neighbors.mask:       [B, K] bool — True where valid
+# neighbors.lengths:    [B] int32 — number of valid neighbors per query
 
 # Gather features for sampled neighbors
-features = sampler.featurize(neighbors)
-# features.node_feat: [B, K, F_n] float32
-# features.edge_feat: [B, K, F_e] float32
-# features.rel_time:  [B, K] float32 — time elapsed since query
-
-# Sample negative destinations
-negatives = sampler.sample_negatives(
-    nodes=np.array([0, 1, 2]),
-    times=np.array([1000, 2000, 3000]),
-    n_neg=100,
-    strategy="mixed",  # "random" | "historical" | "mixed"
-)
-# negatives: [B, n_neg] int64 — negative destination node indices
+features = sampler.featurize(neighbors, np.array([1000, 2000, 3000], dtype=np.float64))
+# features.node_features: [B, K, F_n] float32
+# features.edge_features: [B, K, F_e] float32
+# features.rel_timestamps:[B, K] float64 — time elapsed since query
 ```
 
 ### Backend selection
 
 ```python
-from src.models.temporal_graph_sampler import Backend
-
-sampler = TemporalGraphSampler(..., backend=Backend.AUTO)   # recommended
-sampler = TemporalGraphSampler(..., backend=Backend.CUDA)   # GPU, fastest for K>=100
-sampler = TemporalGraphSampler(..., backend=Backend.CPP)    # CPU C++, sparse graphs
-sampler = TemporalGraphSampler(..., backend=Backend.PYTHON) # always available
+sampler = TemporalGraphSampler(..., backend="auto")    # recommended
+sampler = TemporalGraphSampler(..., backend="cuda")    # GPU, fastest for K>=100
+sampler = TemporalGraphSampler(..., backend="cpp")     # CPU C++, sparse graphs
+sampler = TemporalGraphSampler(..., backend="python")  # always available
 ```
 
 ### Performance (V100, synthetic graph)
@@ -176,7 +186,7 @@ as a real-time feature inside neural network scoring functions.
 ### Quick start
 
 ```python
-from src.models.graph_metrics import CommonNeighbors
+from payment_graph_forecasting import CommonNeighbors
 from scipy import sparse
 import numpy as np
 

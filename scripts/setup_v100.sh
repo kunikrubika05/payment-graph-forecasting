@@ -103,6 +103,8 @@ fi
 log "Installing Python dependencies..."
 pip install numpy scipy pytest tqdm pandas pyarrow pybind11 requests matplotlib -q
 python -c "import ninja" 2>/dev/null || pip install ninja -q
+log "Installing project package dependencies..."
+pip install -e ".[dev]" -q
 
 log "Installing PyG (torch-geometric)..."
 pip install torch-geometric torch-scatter torch-sparse \
@@ -123,6 +125,13 @@ else:
 "
 python -c "import torch; assert torch.cuda.is_available()" || die "PyTorch CUDA check failed"
 log "PyTorch + CUDA OK"
+python -c "
+import joblib
+import yaml
+import payment_graph_forecasting
+print('  Base package deps: OK')
+"
+log "Project package dependencies OK"
 
 ###############################################################################
 log "=== Step 5/7: Build C++ extension ==="

@@ -1,5 +1,8 @@
 import numpy as np
+import torch
 
+import src.models.HyperEvent.hyperevent_evaluate as hyperevent_evaluate
+import src.models.HyperEvent.hyperevent_train as hyperevent_train
 from src.models.HyperEvent.hyperevent_train import ensure_non_empty_relational_sequences
 
 
@@ -27,3 +30,35 @@ def test_ensure_non_empty_relational_sequences_preserves_non_empty_masks():
     _, safe_masks = ensure_non_empty_relational_sequences(vecs, masks)
 
     assert np.array_equal(safe_masks, masks)
+
+
+def test_hyperevent_train_amp_autocast_prefers_torch_amp(monkeypatch):
+    sentinel = object()
+    captured = {}
+
+    def fake_autocast(device_type):
+        captured["device_type"] = device_type
+        return sentinel
+
+    monkeypatch.setattr(torch.amp, "autocast", fake_autocast)
+
+    ctx = hyperevent_train._amp_autocast(enabled=True, device_type="cuda")
+
+    assert ctx is sentinel
+    assert captured["device_type"] == "cuda"
+
+
+def test_hyperevent_eval_amp_autocast_prefers_torch_amp(monkeypatch):
+    sentinel = object()
+    captured = {}
+
+    def fake_autocast(device_type):
+        captured["device_type"] = device_type
+        return sentinel
+
+    monkeypatch.setattr(torch.amp, "autocast", fake_autocast)
+
+    ctx = hyperevent_evaluate._amp_autocast(enabled=True, device_type="cuda")
+
+    assert ctx is sentinel
+    assert captured["device_type"] == "cuda"

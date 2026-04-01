@@ -10,8 +10,9 @@ from payment_graph_forecasting.experiments.runners.hyperevent import (
 
 def test_hyperevent_arg_parser_supports_dry_run():
     parser = build_hyperevent_arg_parser()
-    args = parser.parse_args(["--parquet-path", "/tmp/stream.parquet", "--dry-run"])
+    args = parser.parse_args(["--parquet-path", "/tmp/stream.parquet", "--fraction", "0.1", "--dry-run"])
     assert args.parquet_path == "/tmp/stream.parquet"
+    assert args.fraction == 0.1
     assert args.dry_run is True
 
 
@@ -22,6 +23,7 @@ def test_hyperevent_runner_dry_run_returns_payload(tmp_path):
         raw_remote_path=None,
         parquet_path="/tmp/stream.parquet",
         parquet_remote_path=None,
+        fraction=0.25,
         train_ratio=0.7,
         val_ratio=0.15,
         output=str(tmp_path),
@@ -55,6 +57,7 @@ def test_hyperevent_runner_dry_run_returns_payload(tmp_path):
     assert result["mode"] == "dry_run"
     assert result["parquet_path"] == "/tmp/stream.parquet"
     assert result["parquet_remote_path"] is None
+    assert result["fraction"] == 0.25
     assert result["device"] == "cpu"
     assert result["n_neighbor"] == 12
     assert result["n_latest"] == 6

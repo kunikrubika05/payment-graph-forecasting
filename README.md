@@ -175,6 +175,14 @@ You can also launch experiments from YAML directly:
 The new package path is `payment_graph_forecasting.*`. Legacy `src.*` imports
 still work through compatibility adapters while the refactor is in progress.
 
+CUDA support now has two canonical package-facing entry modes:
+
+- Experiment/YAML contract: set `sampling.backend: auto|cpp|cuda|python` in the
+  experiment spec for integrated model runs.
+- Library/runtime contract: use `payment_graph_forecasting.TemporalGraphSampler`,
+  `payment_graph_forecasting.CommonNeighbors`, and
+  `payment_graph_forecasting.describe_cuda_capabilities()` directly from Python.
+
 Current library-facing model names:
 
 - `graphmixer`
@@ -221,8 +229,44 @@ Optional compiled extensions now also have a package-facing entrypoint:
 ./venv/bin/python -m payment_graph_forecasting.infra.extensions --all --graph-metrics
 ```
 
+When the extensions were already built earlier, package-facing and legacy-backed
+paths now reuse the prebuilt binaries instead of requiring a fresh JIT compile.
+
 Legacy `python src/models/build_ext.py ...` remains available as a compatibility
 shim while the refactor is being finalized.
+
+For small package-facing stream-graph smokes, `data.fraction` is the canonical
+way to cut down parquet-backed runs. This now applies consistently to
+`eagle`, `dygformer`, and `hyperevent`.
+
+Direct library usage example:
+
+```python
+import payment_graph_forecasting as pgf
+from scipy import sparse
+
+caps = pgf.describe_cuda_capabilities()
+print(caps)
+
+sampler = pgf.TemporalGraphSampler(
+    num_nodes=4,
+    src=[0, 0, 1],
+    dst=[1, 2, 2],
+    timestamps=[1.0, 3.0, 2.0],
+    edge_ids=[0, 1, 2],
+    backend="auto",
+)
+
+adj = sparse.csr_matrix(
+    [
+        [0, 1, 1, 0],
+        [1, 0, 1, 1],
+        [1, 1, 0, 0],
+        [0, 1, 0, 0],
+    ]
+)
+cn = pgf.CommonNeighbors(adj, backend="auto")
+```
 
 ## Project structure
 

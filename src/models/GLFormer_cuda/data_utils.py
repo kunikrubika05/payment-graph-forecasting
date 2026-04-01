@@ -1,13 +1,12 @@
 """CUDA-accelerated data utilities for GLFormer.
 
-Wraps TemporalGraphSampler (CUDA backend) to provide the same interface
-as the standard GLFormer data pipeline, but with GPU-accelerated neighbor
-sampling and feature gathering.
-
-Also re-exports loading functions from EAGLE for data preparation.
+This compatibility module now delegates to the shared stream-graph bridge and
+the unified sampler builder. It remains only so legacy GLFormer CUDA code can
+keep importing the historical module path.
 """
 
-from src.models.EAGLE.data_utils import (
+from src.models.data_utils import build_unified_sampler
+from src.models.stream_graph_data import (
     load_temporal_data,
     temporal_data_to_edge_data,
     load_stream_graph_data,
@@ -31,35 +30,10 @@ def build_cuda_sampler(data: TemporalEdgeData, mask=None,
                        backend: str = "auto") -> TemporalGraphSampler:
     """Build a TemporalGraphSampler from TemporalEdgeData.
 
-    Args:
-        data: Temporal edge data with src, dst, timestamps, edge features.
-        mask: Optional boolean mask to select a subset of edges
-            (e.g. train-only edges).
-        backend: Backend to use ('auto', 'cuda', 'cpp', 'python').
-
-    Returns:
-        TemporalGraphSampler configured with the requested backend.
+    Legacy GLFormer CUDA bridge over the shared sampler builder.
     """
-    import numpy as np
 
-    if mask is not None:
-        src = data.src[mask]
-        dst = data.dst[mask]
-        ts = data.timestamps[mask]
-        eids = np.where(mask)[0].astype(np.int64)
-    else:
-        src = data.src
-        dst = data.dst
-        ts = data.timestamps
-        eids = np.arange(len(src), dtype=np.int64)
-
-    return TemporalGraphSampler(
-        num_nodes=data.num_nodes,
-        src=src,
-        dst=dst,
-        timestamps=ts,
-        edge_ids=eids,
-        node_feats=data.node_feats,
-        edge_feats=data.edge_feats,
-        backend=backend,
-    )
+    # TODO(REFACTORING): remove this GLFormer-specific CUDA data bridge once
+    # remaining callers use `src.models.data_utils.build_unified_sampler`
+    # or the package-facing sampling wrappers directly.
+    return build_unified_sampler(data, mask=mask, backend=backend)

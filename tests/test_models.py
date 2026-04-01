@@ -1,5 +1,8 @@
 """Tests for deep learning models (GraphMixer) for temporal link prediction."""
 
+import importlib.machinery
+import types
+
 import numpy as np
 import pytest
 import torch
@@ -23,6 +26,7 @@ from src.models.data_utils import (
     chronological_split,
     _load_cpp_extension,
 )
+import src.models.data_utils as data_utils
 
 
 def _make_dummy_data(num_nodes=50, num_edges=200, edge_feat_dim=2, node_feat_dim=25):
@@ -535,6 +539,69 @@ class TestCppExtension:
     def test_cpp_available(self):
         cpp = _load_cpp_extension()
         assert cpp is not None, "C++ extension should be compiled and available"
+
+    def test_cpp_extension_falls_back_to_prebuilt_binary(self, monkeypatch, tmp_path):
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        suffix = importlib.machinery.EXTENSION_SUFFIXES[0]
+        candidate = build_dir / f"temporal_sampling_cpp{suffix}"
+        candidate.write_bytes(b"")
+
+        loaded = {}
+
+        class DummyLoader:
+            def exec_module(self, module):
+                module.marker = "loaded"
+                loaded["path"] = module.__file__
+
+        def fake_spec_from_file_location(name, location):
+            return types.SimpleNamespace(
+                loader=DummyLoader(),
+                name=name,
+                origin=str(location),
+            )
+
+        def fake_module_from_spec(spec):
+            return types.SimpleNamespace(__file__=spec.origin, __name__=spec.name)
+
+        monkeypatch.setattr(
+            data_utils.importlib.util,
+            "spec_from_file_location",
+            fake_spec_from_file_location,
+        )
+        monkeypatch.setattr(
+            data_utils.importlib.util,
+            "module_from_spec",
+            fake_module_from_spec,
+        )
+
+        module = data_utils._load_prebuilt_cpp_extension(
+            "temporal_sampling_cpp", build_dir
+        )
+
+        assert module is not None
+        assert module.marker == "loaded"
+        assert loaded["path"] == str(candidate)
+
+    def test_load_cpp_extension_uses_prebuilt_when_jit_unavailable(self, monkeypatch):
+        sentinel = object()
+
+        monkeypatch.setattr(data_utils, "_cpp_ext", None)
+        monkeypatch.setattr(data_utils, "_cpp_ext_loaded", False)
+        monkeypatch.setattr(data_utils.Path, "exists", lambda self: True)
+        monkeypatch.setattr(
+            data_utils,
+            "_load_prebuilt_cpp_extension",
+            lambda name, path: sentinel,
+        )
+        monkeypatch.setattr(
+            "torch.utils.cpp_extension.load",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("ninja missing")),
+        )
+
+        module = data_utils._load_cpp_extension()
+
+        assert module is sentinel
 
     def test_csr_neighbors_match(self):
         cpp = _load_cpp_extension()

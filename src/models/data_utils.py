@@ -8,6 +8,8 @@ Falls back to pure Python/NumPy otherwise.
 Build C++ extension: python src/models/build_ext.py
 """
 
+import importlib.machinery
+import importlib.util
 import os
 import logging
 from pathlib import Path
@@ -29,6 +31,31 @@ logger = logging.getLogger(__name__)
 
 _cpp_ext = None
 _cpp_ext_loaded = False
+
+
+def _load_prebuilt_cpp_extension(module_name: str, build_dir: Path):
+    """Load a previously built extension module from the local build dir."""
+
+    if not build_dir.exists():
+        return None
+
+    suffixes = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+    candidates = sorted(
+        path
+        for path in build_dir.iterdir()
+        if path.name.startswith(module_name) and path.name.endswith(suffixes)
+    )
+    for candidate in reversed(candidates):
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, candidate)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        except Exception as exc:
+            logger.debug("Prebuilt extension load failed for %s: %s", candidate, exc)
+    return None
 
 
 def _build_python_cpp_fallback():
@@ -136,22 +163,28 @@ def _load_cpp_extension():
     if _cpp_ext_loaded:
         return _cpp_ext
     _cpp_ext_loaded = True
+    build_dir = Path(__file__).parent / "csrc" / "build"
     try:
         from torch.utils.cpp_extension import load as _load_ext
         cpp_path = str(Path(__file__).parent / "csrc" / "temporal_sampling.cpp")
-        build_dir = str(Path(__file__).parent / "csrc" / "build")
         if Path(cpp_path).exists():
             _cpp_ext = _load_ext(
                 name="temporal_sampling_cpp",
                 sources=[cpp_path],
-                build_directory=build_dir,
+                build_directory=str(build_dir),
                 extra_cflags=["-O3"],
                 verbose=False,
             )
             logger.info("Loaded C++ temporal sampling extension")
+            return _cpp_ext
     except Exception as e:
-        logger.info("C++ extension unavailable (%s), using Python fallback", e)
-        _cpp_ext = _build_python_cpp_fallback()
+        logger.info("C++ extension JIT load unavailable (%s), checking prebuilt binary", e)
+    _cpp_ext = _load_prebuilt_cpp_extension("temporal_sampling_cpp", build_dir)
+    if _cpp_ext is not None:
+        logger.info("Loaded prebuilt C++ temporal sampling extension")
+        return _cpp_ext
+    logger.info("C++ extension unavailable, using Python fallback")
+    _cpp_ext = _build_python_cpp_fallback()
     return _cpp_ext
 
 

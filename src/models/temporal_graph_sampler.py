@@ -186,6 +186,18 @@ def resolve_backend(requested: str) -> Backend:
     return Backend.PYTHON
 
 
+def has_cpp() -> bool:
+    """Return whether the temporal sampling C++ backend is available."""
+
+    return _try_load_cpp() is not None
+
+
+def has_cuda() -> bool:
+    """Return whether the temporal sampling CUDA backend is available."""
+
+    return _try_load_cuda() is not None
+
+
 class TemporalGraphSampler:
     """Unified temporal graph sampler supporting Python, C++, and CUDA backends.
 

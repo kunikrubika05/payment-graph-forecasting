@@ -26,7 +26,7 @@ from payment_graph_forecasting.experiments.runner_utils import (
 )
 from payment_graph_forecasting.infra.datasets import resolve_stream_graph_dataset
 from payment_graph_forecasting.training.api import train_dygformer_model
-from src.models.DyGFormer.data_utils import build_temporal_csr, load_stream_graph_data
+from src.models.stream_graph_data import build_temporal_csr, load_stream_graph_data
 
 logger = configure_root_logging()
 
