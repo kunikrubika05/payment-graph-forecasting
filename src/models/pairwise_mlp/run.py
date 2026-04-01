@@ -255,7 +255,7 @@ def run_experiment(cfg: PairMLPConfig, token: str) -> None:
     # [7] Final eval with best checkpoint
     # ------------------------------------------------------------------
     print("\n[7/7] Final evaluation (best checkpoint)...", flush=True)
-    ckpt = torch.load(history["ckpt_path"], map_location=device)
+    ckpt = torch.load(history["ckpt_path"], map_location=device, weights_only=True)
     model.load_state_dict(ckpt["model_state"])
     print(f"  Best epoch={ckpt['epoch']}, val_MRR={ckpt['val_mrr']:.4f}",
           flush=True)

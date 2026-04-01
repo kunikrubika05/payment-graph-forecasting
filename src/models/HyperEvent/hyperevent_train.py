@@ -334,6 +334,8 @@ def ensure_non_empty_relational_sequences(
 
 def _amp_autocast(enabled: bool, device_type: str):
     if enabled and device_type == "cuda":
+        if hasattr(torch, "amp"):
+            return torch.amp.autocast("cuda")
         return torch.cuda.amp.autocast()
     return contextlib.nullcontext()
 
