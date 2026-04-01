@@ -239,6 +239,39 @@ For small package-facing stream-graph smokes, `data.fraction` is the canonical
 way to cut down parquet-backed runs. This now applies consistently to
 `eagle`, `dygformer`, and `hyperevent`.
 
+For chronologically sorted stream-graph parquet files, `fraction` means the
+same thing as in training: take the chronological prefix
+`df.iloc[:int(len(df) * fraction)]` of the selected period. It is not a
+separate graph-science heuristic and it is not a random sample.
+
+Package-facing stream-graph slicing and lightweight analysis:
+
+```python
+from payment_graph_forecasting.data import open_stream_graph
+from payment_graph_forecasting.analysis import analyze_stream_graph
+
+dataset = open_stream_graph(
+    "/tmp/pfg_data_smoke/orbitaal_processed/stream_graph/2020-06-01__2020-08-31.parquet"
+)
+
+full_report = analyze_stream_graph(dataset)
+prefix_report = analyze_stream_graph(dataset.slice_period_fraction(0.1))
+print(full_report.to_text())
+print(prefix_report.to_text())
+```
+
+User-facing wrappers:
+
+```bash
+./venv/bin/python scripts/analyze_stream_graph.py \
+    --input /tmp/pfg_data_smoke/orbitaal_processed/stream_graph/2020-06-01__2020-08-31.parquet \
+    --full
+
+./venv/bin/python scripts/analyze_stream_graph.py \
+    --input /tmp/pfg_data_smoke/orbitaal_processed/stream_graph/2020-06-01__2020-08-31.parquet \
+    --fraction 0.1
+```
+
 Direct library usage example:
 
 ```python
